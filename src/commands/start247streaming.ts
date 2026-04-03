@@ -9,7 +9,7 @@ import { DiscordUtils } from "../utils/shared.js";
 
 export default class Start247StreamingCommand extends BaseCommand {
 	name = "start247streaming";
-	description = "Start continuous random top-movie streaming through Meteor/Stremio";
+	description = "Start continuous top-movie streaming through Meteor/Stremio";
 	usage = "start247streaming";
 
 	private tmdbService: TmdbService;
@@ -78,7 +78,7 @@ export default class Start247StreamingCommand extends BaseCommand {
 
 				const success = await context.streamingService.addToQueue(
 					context.message,
-					candidate.imdbId,
+					candidate.finalUrl,
 					`247: ${candidate.query}`
 				);
 
@@ -93,8 +93,7 @@ export default class Start247StreamingCommand extends BaseCommand {
 		}
 	}
 
-	private async pickPlayableMovieCandidate(): Promise<{ imdbId: string; query: string } | null> {
-		// Try a few pages and several random picks before giving up
+	private async pickPlayableMovieCandidate(): Promise<{ imdbId: string; query: string; finalUrl: string } | null> {
 		const pages = [1, 2, 3, 4, 5];
 
 		for (const page of pages) {
@@ -112,15 +111,16 @@ export default class Start247StreamingCommand extends BaseCommand {
 					continue;
 				}
 
-				const hasPlayable = await this.hasPlayableMeteorStream(imdbId);
-				if (!hasPlayable) {
+				const finalUrl = await this.getPlayableMeteorUrl(imdbId);
+				if (!finalUrl) {
 					logger.info(`247 skip: no playable Meteor stream for ${movie.title} (${imdbId})`);
 					continue;
 				}
 
 				return {
 					imdbId,
-					query: this.tmdbService.formatMovieQuery(movie)
+					query: this.tmdbService.formatMovieQuery(movie),
+					finalUrl
 				};
 			}
 		}
@@ -128,22 +128,51 @@ export default class Start247StreamingCommand extends BaseCommand {
 		return null;
 	}
 
-	private async hasPlayableMeteorStream(imdbId: string): Promise<boolean> {
+	private async getPlayableMeteorUrl(imdbId: string): Promise<string | null> {
 		try {
 			const streams = await this.stremioService.getMovieStreams(imdbId);
-			if (!streams.length) return false;
+			if (!streams.length) return null;
 
 			const englishStreams = this.stremioService.filterEnglishStreams(streams);
-			if (!englishStreams.length) return false;
+			if (!englishStreams.length) return null;
 
 			const best = this.stremioService.pickBestPlayableHighQualityEnglishStream(englishStreams);
-			if (!best) return false;
+			if (!best) return null;
 
 			const playable = this.stremioService.toPlayableInput(best);
-			return Boolean(playable);
+			if (!playable) return null;
+
+			// Resolve Meteor /play/... URLs to final CDN URL
+			if (/^https?:\/\//i.test(playable) && !playable.includes("youtube.com")) {
+				const response = await fetch(playable, {
+					method: "GET",
+					redirect: "follow",
+					headers: {
+						"user-agent": "Mozilla/5.0",
+						"accept": "*/*"
+					}
+				});
+
+				if (!response.ok) return null;
+
+				const contentType = response.headers.get("content-type") || "";
+				const finalUrl = response.url || playable;
+
+				if (
+					contentType.includes("text/html") ||
+					contentType.includes("application/json") ||
+					contentType.includes("text/plain")
+				) {
+					return null;
+				}
+
+				return finalUrl;
+			}
+
+			return playable;
 		} catch (error) {
 			logger.warn(`Meteor preflight failed for ${imdbId}: ${error instanceof Error ? error.message : String(error)}`);
-			return false;
+			return null;
 		}
 	}
 
