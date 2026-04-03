@@ -5,9 +5,10 @@ type TmdbMovie = {
 	release_date?: string;
 	popularity?: number;
 	vote_average?: number;
+	vote_count?: number;
 };
 
-type TmdbTrendingResponse = {
+type TmdbMovieListResponse = {
 	results?: TmdbMovie[];
 };
 
@@ -27,8 +28,8 @@ export default class TmdbService {
 		};
 	}
 
-	async getTrendingMovies(timeWindow: "day" | "week" = "week"): Promise<TmdbMovie[]> {
-		const url = `${this.baseUrl}/trending/movie/${timeWindow}?language=en-US`;
+	async getTopRatedReleasedMovies(page = 1): Promise<TmdbMovie[]> {
+		const url = `${this.baseUrl}/movie/top_rated?language=en-US&page=${page}`;
 
 		const response = await fetch(url, {
 			method: "GET",
@@ -36,10 +37,37 @@ export default class TmdbService {
 		});
 
 		if (!response.ok) {
-			throw new Error(`TMDb trending request failed: ${response.status} ${response.statusText}`);
+			throw new Error(`TMDb top rated request failed: ${response.status} ${response.statusText}`);
 		}
 
-		const data = (await response.json()) as TmdbTrendingResponse;
+		const data = (await response.json()) as TmdbMovieListResponse;
+		return Array.isArray(data.results) ? data.results : [];
+	}
+
+	async getDiscoverReleasedMovies(page = 1): Promise<TmdbMovie[]> {
+		const today = new Date().toISOString().slice(0, 10);
+		const params = new URLSearchParams({
+			include_adult: "false",
+			include_video: "false",
+			language: "en-US",
+			page: String(page),
+			sort_by: "vote_average.desc",
+			"vote_count.gte": "5000",
+			"primary_release_date.lte": today
+		});
+
+		const url = `${this.baseUrl}/discover/movie?${params.toString()}`;
+
+		const response = await fetch(url, {
+			method: "GET",
+			headers: this.getHeaders()
+		});
+
+		if (!response.ok) {
+			throw new Error(`TMDb discover request failed: ${response.status} ${response.statusText}`);
+		}
+
+		const data = (await response.json()) as TmdbMovieListResponse;
 		return Array.isArray(data.results) ? data.results : [];
 	}
 
