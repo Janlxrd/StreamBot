@@ -1,6 +1,7 @@
 import { Client, Message } from "discord.js-selfbot-v13";
 import { Streamer, Utils, prepareStream, playStream } from "@dank074/discord-video-stream";
 import fs from 'fs';
+import { execFile } from "child_process";
 import config from "../config.js";
 import { MediaService } from './media.js';
 import { QueueService } from './queue.js';
@@ -10,20 +11,20 @@ import { DiscordUtils, ErrorUtils } from '../utils/shared.js';
 import { QueueItem, StreamStatus } from '../types/index.js';
 
 export class StreamingService {
- 	private streamer: Streamer;
- 	private mediaService: MediaService;
- 	private queueService: QueueService;
- 	private controller: AbortController | null = null;
- 	private streamStatus: StreamStatus;
- 	private failedVideos: Set<string> = new Set();
- 	private isSkipping: boolean = false;
+	private streamer: Streamer;
+	private mediaService: MediaService;
+	private queueService: QueueService;
+	private controller: AbortController | null = null;
+	private streamStatus: StreamStatus;
+	private failedVideos: Set<string> = new Set();
+	private isSkipping: boolean = false;
 
- 	constructor(client: Client, streamStatus: StreamStatus) {
- 		this.streamer = new Streamer(client);
- 		this.mediaService = new MediaService();
- 		this.queueService = new QueueService();
- 		this.streamStatus = streamStatus;
- 	}
+	constructor(client: Client, streamStatus: StreamStatus) {
+		this.streamer = new Streamer(client);
+		this.mediaService = new MediaService();
+		this.queueService = new QueueService();
+		this.streamStatus = streamStatus;
+	}
 
 	public getStreamer(): Streamer {
 		return this.streamer;
@@ -31,6 +32,108 @@ export class StreamingService {
 
 	public getQueueService(): QueueService {
 		return this.queueService;
+	}
+
+	private isHttpUrl(value: string): boolean {
+		return /^https?:\/\//i.test(value);
+	}
+
+	private isYouTubeUrl(value: string): boolean {
+		return /(?:youtube\.com|youtu\.be)/i.test(value);
+	}
+
+	private isProxyLikeStreamUrl(value: string): boolean {
+		if (!this.isHttpUrl(value)) return false;
+
+		return (
+			/\/play\//i.test(value) ||
+			/midnightignite\.me/i.test(value) ||
+			/stremio/i.test(value) ||
+			/meteor/i.test(value)
+		);
+	}
+
+	private async getPreferredEnglishAudioIndex(videoUrl: string): Promise<number | null> {
+		try {
+			const result: string = await new Promise((resolve, reject) => {
+				execFile(
+					"ffprobe",
+					[
+						"-v", "error",
+						"-show_streams",
+						"-select_streams", "a",
+						"-of", "json",
+						videoUrl
+					],
+					(error, stdout) => {
+						if (error) {
+							reject(error);
+							return;
+						}
+						resolve(stdout);
+					}
+				);
+			});
+
+			const data = JSON.parse(result);
+			const streams = Array.isArray(data.streams) ? data.streams : [];
+
+			if (!streams.length) return null;
+
+			const scored = streams.map((stream: any, audioOrderIndex: number) => {
+				const lang = String(stream.tags?.language || "").toLowerCase();
+				const title = String(stream.tags?.title || "").toLowerCase();
+				const handler = String(stream.tags?.handler_name || "").toLowerCase();
+				const text = `${lang} ${title} ${handler}`;
+
+				let score = 0;
+
+				if (lang === "eng" || lang === "en") score += 100;
+				if (text.includes("english")) score += 80;
+				if (text.includes(" eng ")) score += 40 || text.includes("eng");
+				if (lang === "ukr" || lang === "uk") score -= 120;
+				if (text.includes("ukrain")) score -= 100;
+				if (lang === "ita" || lang === "it") score -= 40;
+				if (text.includes("ital")) score -= 30;
+				if (lang === "rus" || lang === "ru") score -= 80;
+				if (text.includes("russian")) score -= 80;
+
+				return {
+					audioOrderIndex,
+					ffprobeIndex: stream.index,
+					score,
+					lang,
+					title,
+					handler
+				};
+			});
+
+			scored.sort((a, b) => b.score - a.score);
+			logger.info(`Detected audio streams: ${JSON.stringify(scored, null, 2)}`);
+
+			const best = scored[0];
+			if (!best) return null;
+
+			// Return audio-stream order, not ffprobe global index
+			return best.audioOrderIndex;
+		} catch (error) {
+			logger.warn("Failed to detect English audio track:", error);
+			return null;
+		}
+	}
+
+	private getManualPreferredAudioIndexFromTitle(title?: string): number | null {
+		if (!title) return null;
+
+		const normalized = title.toLowerCase();
+
+		// Very common release naming:
+		// "ITA 5.1 ENG" often means first track is ITA, second is ENG
+		if (normalized.includes(" ita ") && normalized.includes(" eng ")) {
+			return 2;
+		}
+
+		return null;
 	}
 
 	private markVideoAsFailed(videoSource: string): void {
@@ -45,6 +148,21 @@ export class StreamingService {
 	): Promise<boolean> {
 		try {
 			const username = message.author.username;
+
+			// If this is already a direct HTTP stream URL, do not re-resolve it.
+			if (this.isHttpUrl(videoSource) && !this.isYouTubeUrl(videoSource)) {
+				const queueItem = await this.queueService.add(
+					videoSource,
+					title || videoSource,
+					username,
+					'url',
+					true,
+					videoSource
+				);
+				await DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
+				return true;
+			}
+
 			const mediaSource = await this.mediaService.resolveMediaSource(videoSource);
 
 			if (mediaSource) {
@@ -52,7 +170,6 @@ export class StreamingService {
 				await DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
 				return true;
 			} else {
-				// Fallback for unresolved sources
 				const queueItem = await this.queueService.add(
 					videoSource,
 					title || videoSource,
@@ -69,7 +186,6 @@ export class StreamingService {
 			return false;
 		}
 	}
-
 
 	public async playFromQueue(message: Message): Promise<void> {
 		if (this.streamStatus.playing) {
@@ -93,11 +209,9 @@ export class StreamingService {
 			return;
 		}
 
-		// Check if this is the last item in the queue
 		const queueLength = this.queueService.getLength();
 		const isLastItem = queueLength <= 1;
 
-		// Prevent concurrent skip operations only if there are more items in queue
 		if (this.isSkipping && !isLastItem) {
 			await DiscordUtils.sendError(message, 'Skip already in progress.');
 			return;
@@ -106,16 +220,14 @@ export class StreamingService {
 		this.isSkipping = true;
 
 		try {
-			// Stop the current stream immediately
 			this.streamStatus.manualStop = true;
 			this.controller?.abort();
 			this.streamer.stopStream();
 
-			const currentItem = this.queueService.getCurrent(); // Get item being skipped
-			const nextItem = this.queueService.skip(); // Advance the queue
+			const currentItem = this.queueService.getCurrent();
+			const nextItem = this.queueService.skip();
 
 			if (!nextItem) {
-				// No more items in queue - stop playback and leave voice channel
 				await DiscordUtils.sendInfo(message, 'Queue', 'No more videos in queue.');
 				this.queueService.setPlaying(false);
 				await this.cleanupStreamStatus();
@@ -125,10 +237,7 @@ export class StreamingService {
 			const currentTitle = currentItem ? currentItem.title : 'current video';
 			await DiscordUtils.sendInfo(message, 'Skipping', `Skipping \`${currentTitle}\`. Playing next: \`${nextItem.title}\``);
 
-			// Reset manual stop flag since we're starting a new video
 			this.streamStatus.manualStop = false;
-
-			// Skip cleanup since we're playing the next item immediately
 			await this.playVideoFromQueueItem(message, nextItem);
 		} finally {
 			this.isSkipping = false;
@@ -136,19 +245,21 @@ export class StreamingService {
 	}
 
 	private async playVideoFromQueueItem(message: Message, queueItem: QueueItem): Promise<void> {
-		// Ensure queue is marked as playing
 		this.queueService.setPlaying(true);
 
-		// Collect video parameters if respect_video_params is enabled
 		let videoParams = undefined;
-		if (config.respect_video_params) {
+
+		const shouldProbe =
+			config.respect_video_params &&
+			!this.isProxyLikeStreamUrl(queueItem.url);
+
+		if (shouldProbe) {
 			videoParams = await this.getVideoParameters(queueItem.url);
+		} else if (config.respect_video_params) {
+			logger.info(`Skipping video parameter probe for proxy-like stream URL: ${queueItem.url}`);
 		}
 
-		// Log playing video
 		logger.info(`Playing from queue: ${queueItem.title} (${queueItem.url})`);
-
-		// Use streaming service to play the video with video parameters
 		await this.playVideo(message, queueItem.url, queueItem.title, videoParams);
 	}
 
@@ -156,7 +267,7 @@ export class StreamingService {
 		try {
 			const resolution = await getVideoParams(videoUrl);
 			logger.info(`Video parameters: ${resolution.width}x${resolution.height}, FPS: ${resolution.fps || 'unknown'}, Bitrate: ${resolution.bitrate || 'unknown'}`);
-			
+
 			let bitrateKbps: number | undefined;
 			if (resolution.bitrate) {
 				bitrateKbps = Math.round(parseInt(resolution.bitrate) / 1000);
@@ -175,7 +286,6 @@ export class StreamingService {
 	}
 
 	private async ensureVoiceConnection(guildId: string, channelId: string, title?: string): Promise<void> {
-		// Only join voice if not already connected
 		if (!this.streamStatus.joined || !this.streamer.voiceConnection) {
 			await this.streamer.joinVoice(guildId, channelId);
 			this.streamStatus.joined = true;
@@ -187,10 +297,8 @@ export class StreamingService {
 			this.streamer.client.user?.setActivity(DiscordUtils.status_watch(title));
 		}
 
-		// Wait for voice connection to be fully ready
 		await new Promise(resolve => setTimeout(resolve, 2000));
 
-		// Verify voice connection exists
 		if (!this.streamer.voiceConnection) {
 			throw new Error('Voice connection is not established');
 		}
@@ -202,12 +310,10 @@ export class StreamingService {
 		let frameRate = videoParams?.fps || config.fps;
 		let bitrateVideo = config.bitrateKbps;
 
-		// If respecting video params, use video bitrate unless overridden
 		if (videoParams && videoParams.bitrate && !config.bitrateOverride) {
 			bitrateVideo = videoParams.bitrate;
 		}
 
-		// Resolution capping
 		if (config.maxWidth > 0 || config.maxHeight > 0) {
 			const ratio = width / height;
 			if (config.maxWidth > 0 && width > config.maxWidth) {
@@ -218,7 +324,6 @@ export class StreamingService {
 				height = config.maxHeight;
 				width = Math.round(height * ratio);
 			}
-			// Ensure even dimensions
 			width = Math.round(width / 2) * 2;
 			height = Math.round(height / 2) * 2;
 		}
@@ -236,11 +341,31 @@ export class StreamingService {
 		};
 	}
 
-	private async executeStream(inputForFfmpeg: any, streamOpts: any, message: Message, title: string, videoSource: string): Promise<void> {
-		const { command, output: ffmpegOutput } = prepareStream(inputForFfmpeg, streamOpts, this.controller!.signal);
+	private async executeStream(inputForFfmpeg: any, streamOpts: any, message: Message, title: string, videoSource: string, audioStreamIndex?: number | null): Promise<void> {
+	const { command, output: ffmpegOutput } = prepareStream(inputForFfmpeg, streamOpts, this.controller!.signal);
+
+	command.inputOptions([
+		"-analyzeduration", "100M",
+		"-probesize", "100M",
+		"-fflags", "+genpts",
+		"-reconnect", "1",
+		"-reconnect_streamed", "1",
+		"-reconnect_delay_max", "5"
+	]);
+
+	if (audioStreamIndex !== null && audioStreamIndex !== undefined) {
+		command.outputOptions([
+			"-map", "-0:a:0",
+			"-map", `0:a:${audioStreamIndex}`
+		]);
+		logger.info(`Using English audio track order index: ${audioStreamIndex}`);
+	}
+
+	command.on("start", (cmdline) => {
+		logger.info(`ffmpeg command: ${cmdline}`);
+	});
 
 		command.on("error", (err, stdout, stderr) => {
-			// Don't log error if it's due to manual stop
 			if (!this.streamStatus.manualStop && this.controller && !this.controller.signal.aborted) {
 				logger.error("An error happened with ffmpeg:", err.message);
 				if (stdout) {
@@ -257,7 +382,6 @@ export class StreamingService {
 			.catch((err) => {
 				if (this.controller && !this.controller.signal.aborted) {
 					logger.error('playStream error:', err);
-					// Send error message to user
 					DiscordUtils.sendError(message, `Stream error: ${err.message || 'Unknown error'}`).catch(e =>
 						logger.error('Failed to send error message:', e)
 					);
@@ -265,7 +389,6 @@ export class StreamingService {
 				if (this.controller && !this.controller.signal.aborted) this.controller.abort();
 			});
 
-		// Only log as finished if we didn't have an error and weren't manually stopped
 		if (this.controller && !this.controller.signal.aborted && !this.streamStatus.manualStop) {
 			logger.info(`Finished playing: ${title || videoSource}`);
 		} else if (this.streamStatus.manualStop) {
@@ -278,13 +401,11 @@ export class StreamingService {
 	private async handleQueueAdvancement(message: Message): Promise<void> {
 		await DiscordUtils.sendFinishMessage(message);
 
-		// The video finished playing, so remove it from the queue
 		const finishedItem = this.queueService.getCurrent();
 		if (finishedItem) {
 			this.queueService.removeFromQueue(finishedItem.id);
 		}
 
-		// Get the next item in the queue.
 		const nextItem = this.queueService.getNext();
 
 		if (nextItem) {
@@ -295,7 +416,6 @@ export class StreamingService {
 				);
 			}, 1000);
 		} else {
-			// No more items in the queue, so stop playback and clean up
 			this.queueService.setPlaying(false);
 			logger.info('No more items in queue, playback stopped');
 			await this.cleanupStreamStatus();
@@ -332,7 +452,15 @@ export class StreamingService {
 		}
 	}
 
-	private async prepareVideoSource(message: Message, videoSource: string, title?: string): Promise<{ inputForFfmpeg: any, tempFilePath: string | null }> {
+	private async prepareVideoSource(
+		message: Message,
+		videoSource: string,
+		title?: string
+	): Promise<{ inputForFfmpeg: any, tempFilePath: string | null }> {
+		if (this.isHttpUrl(videoSource) && !this.isYouTubeUrl(videoSource)) {
+			return { inputForFfmpeg: videoSource, tempFilePath: null };
+		}
+
 		const mediaSource = await this.mediaService.resolveMediaSource(videoSource);
 
 		if (mediaSource && mediaSource.type === 'youtube' && !mediaSource.isLive) {
@@ -340,16 +468,22 @@ export class StreamingService {
 			if (tempFilePath) {
 				return { inputForFfmpeg: tempFilePath, tempFilePath };
 			}
-			// Download failed, throw to stop playback
 			throw new Error('Failed to prepare video source due to download failure.');
 		}
 
 		return { inputForFfmpeg: mediaSource ? mediaSource.url : videoSource, tempFilePath: null };
 	}
 
-	private async executeStreamWorkflow(input: any, options: any, message: Message, title: string, source: string): Promise<void> {
+	private async executeStreamWorkflow(
+		input: any,
+		options: any,
+		message: Message,
+		title: string,
+		source: string,
+		audioStreamIndex?: number | null
+	): Promise<void> {
 		this.controller = new AbortController();
-		await this.executeStream(input, options, message, title, source);
+		await this.executeStream(input, options, message, title, source, audioStreamIndex);
 	}
 
 	private async finalizeStream(message: Message, tempFile: string | null): Promise<void> {
@@ -386,11 +520,33 @@ export class StreamingService {
 			const { inputForFfmpeg, tempFilePath } = await this.prepareVideoSource(message, videoSource, title);
 			tempFile = tempFilePath;
 
+			logger.info(`FFmpeg input source: ${inputForFfmpeg}`);
+
 			await this.ensureVoiceConnection(guildId, channelId, title);
 			await DiscordUtils.sendPlaying(message, title || videoSource);
 
+			let audioStreamIndex: number | null = null;
+
+			if (typeof inputForFfmpeg === "string" && !this.isYouTubeUrl(inputForFfmpeg)) {
+				audioStreamIndex = await this.getPreferredEnglishAudioIndex(inputForFfmpeg);
+
+				if (audioStreamIndex === null) {
+					audioStreamIndex = this.getManualPreferredAudioIndexFromTitle(title || videoSource);
+				}
+			}
+
+			logger.info(`Final selected audio stream index: ${audioStreamIndex}`);
+
 			const streamOpts = this.setupStreamConfiguration(videoParams);
-			await this.executeStreamWorkflow(inputForFfmpeg, streamOpts, message, title || videoSource, videoSource);
+			await this.executeStreamWorkflow(
+				inputForFfmpeg,
+				streamOpts,
+				message,
+				title || videoSource,
+				videoSource,
+				audioStreamIndex
+			);
+
 		} catch (error) {
 			await ErrorUtils.handleError(error, `playing video: ${title || videoSource}`);
 			if (this.controller && !this.controller.signal.aborted) this.controller.abort();
@@ -405,8 +561,6 @@ export class StreamingService {
 			this.controller?.abort();
 			this.streamer.stopStream();
 
-			// Only leave voice if we're not playing another video
-			// Check if there are items in queue that might be played
 			const hasQueueItems = !this.queueService.isEmpty();
 			if (!hasQueueItems) {
 				this.streamer.leaveVoice();
@@ -416,7 +570,6 @@ export class StreamingService {
 
 			this.streamer.client.user?.setActivity(DiscordUtils.status_idle());
 
-			// Reset all status flags
 			this.streamStatus.playing = false;
 			this.streamStatus.manualStop = false;
 			this.streamStatus.channelInfo = {
@@ -430,12 +583,8 @@ export class StreamingService {
 	}
 
 	public async stopAndClearQueue(): Promise<void> {
-		// Clear the queue
 		this.queueService.clearQueue();
 		logger.info("Queue cleared by stop command");
-
-		// Then cleanup the stream
 		await this.cleanupStreamStatus();
 	}
-
 }
