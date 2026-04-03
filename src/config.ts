@@ -100,5 +100,11 @@ export default {
 	server_port: parseInt(process.env.SERVER_PORT ? process.env.SERVER_PORT : '8080'),
 	stremioAddonUrl: process.env.STREMIO_ADDON || "localhost:8080/stremio-addon/v1/manifest.json",
 	tmdbApiKey: process.env.TMDB_API_KEY || "",
+	auto247MinYear: parseInt(process.env.AUTO247_MIN_YEAR || "2020", 10),
+	auto247AllowedGenres: (process.env.AUTO247_ALLOWED_GENRES || "")
+		.split(",")
+		.map(s => s.trim())
+		.filter(Boolean),
 	auto247IntervalMs: parseInt(process.env.AUTO247_INTERVAL_MS || "10000", 10),
+	tmdbApiKey: process.env.TMDB_API_KEY || "",
 }
