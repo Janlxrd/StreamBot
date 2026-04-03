@@ -104,6 +104,6 @@ export default {
 		.split(",")
 		.map(s => s.trim())
 		.filter(Boolean),
-	tmdbReadAccessToken: process.env.TMDB_READ_ACCESS_TOKEN || "",
+	tmdbApiKey: process.env.TMDB_READ_ACCESS_TOKEN || "",
 	auto247IntervalMs: parseInt(process.env.AUTO247_INTERVAL_MS || "2000", 10),
 }
