@@ -90,7 +90,7 @@ export class StreamingService {
 
 				if (lang === "eng" || lang === "en") score += 100;
 				if (text.includes("english")) score += 80;
-				if (text.includes(" eng ")) score += 40 || text.includes("eng");
+				if (text.includes(" eng ") || text.includes("eng")) score += 40;
 				if (lang === "ukr" || lang === "uk") score -= 120;
 				if (text.includes("ukrain")) score -= 100;
 				if (lang === "ita" || lang === "it") score -= 40;
