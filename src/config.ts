@@ -105,4 +105,5 @@ export default {
 		.map(s => s.trim())
 		.filter(Boolean),
 	tmdbApiKey: process.env.TMDB_API_KEY || "",
+	auto247IntervalMs: parseInt(process.env.AUTO247_INTERVAL_MS || "2000", 10),
 }
