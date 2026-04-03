@@ -351,7 +351,8 @@ export class StreamingService {
 
 	command.inputOptions([
 		"-fflags", "+genpts",
-		"-rw_timeout", "15000000"
+		"-rw_timeout", "15000000",
+		"-read_ahead_limit", "-1"
 	]);
 
 	if (audioStreamIndex !== null && audioStreamIndex !== undefined) {
