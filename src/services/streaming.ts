@@ -303,14 +303,8 @@ export class StreamingService {
 			throw new Error('Voice connection is not established');
 		}
 	}
-
+	
 	private setupStreamConfiguration(videoParams?: { width: number, height: number, fps?: number, bitrate?: number }): any {
-		const sourceWidth = videoParams?.width || config.width;
-		const sourceHeight = videoParams?.height || config.height;
-	
-		let width = sourceWidth;
-		let height = sourceHeight;
-	
 		let frameRate = videoParams?.fps || config.fps;
 		let bitrateVideo = config.bitrateKbps;
 	
@@ -318,25 +312,9 @@ export class StreamingService {
 			bitrateVideo = videoParams.bitrate;
 		}
 	
-		// Treat maxWidth/maxHeight as a bounding box, not a forced output size
-		const maxWidth = config.maxWidth > 0 ? config.maxWidth : width;
-		const maxHeight = config.maxHeight > 0 ? config.maxHeight : height;
-	
-		// Never upscale beyond the source dimensions
-		const widthScale = maxWidth / sourceWidth;
-		const heightScale = maxHeight / sourceHeight;
-		const scale = Math.min(widthScale, heightScale, 1);
-	
-		width = Math.floor((sourceWidth * scale) / 2) * 2;
-		height = Math.floor((sourceHeight * scale) / 2) * 2;
-	
-		// Fallback safety
-		if (width < 2) width = 2;
-		if (height < 2) height = 2;
-	
 		return {
-			width,
-			height,
+			width: undefined,
+			height: undefined,
 			frameRate,
 			bitrateVideo,
 			bitrateVideoMax: config.maxBitrateKbps,
@@ -346,6 +324,7 @@ export class StreamingService {
 			h26xPreset: config.h26xPreset
 		};
 	}
+	
 	private async executeStream(inputForFfmpeg: any, streamOpts: any, message: Message, title: string, videoSource: string, audioStreamIndex?: number | null): Promise<void> {
 	const ffmpegInput =
 		typeof inputForFfmpeg === "string" && /^https?:\/\//i.test(inputForFfmpeg)
