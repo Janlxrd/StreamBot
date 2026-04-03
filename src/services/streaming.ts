@@ -364,7 +364,6 @@ export class StreamingService {
 
 	if (audioStreamIndex !== null && audioStreamIndex !== undefined) {
 		command.outputOptions([
-			"-map", "-0:a:0",
 			"-map", `0:a:${audioStreamIndex}`
 		]);
 		logger.info(`Using English audio track order index: ${audioStreamIndex}`);
