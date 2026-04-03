@@ -98,4 +98,5 @@ export default {
 	server_username: process.env.SERVER_USERNAME ? process.env.SERVER_USERNAME : 'admin',
 	server_password: process.env.SERVER_PASSWORD ? process.env.SERVER_PASSWORD : 'admin',
 	server_port: parseInt(process.env.SERVER_PORT ? process.env.SERVER_PORT : '8080'),
+	stremioAddonUrl: process.env.STREMIO_ADDON || "localhost:8080/stremio-addon/v1/manifest.json",
 }
