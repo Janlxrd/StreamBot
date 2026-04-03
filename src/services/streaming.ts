@@ -345,12 +345,15 @@ export class StreamingService {
 	const { command, output: ffmpegOutput } = prepareStream(inputForFfmpeg, streamOpts, this.controller!.signal);
 
 	command.inputOptions([
-		"-analyzeduration", "100M",
-		"-probesize", "100M",
+		"-analyzeduration", "50M",
+		"-probesize", "50M",
 		"-fflags", "+genpts",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
-		"-reconnect_delay_max", "5"
+		"-reconnect_delay_max", "5",
+		"-reconnect_at_eof", "1",
+		"-rw_timeout", "15000000",
+		"-thread_queue_size", "4096"
 	]);
 
 	if (audioStreamIndex !== null && audioStreamIndex !== undefined) {
