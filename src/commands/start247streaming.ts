@@ -9,7 +9,7 @@ import { DiscordUtils } from "../utils/shared.js";
 
 export default class Start247StreamingCommand extends BaseCommand {
 	name = "start247streaming";
-	description = "Start continuous top-movie streaming through Meteor/Stremio";
+	description = "Start continuous movie streaming through Meteor/Stremio";
 	usage = "start247streaming";
 
 	private tmdbService: TmdbService;
@@ -45,7 +45,7 @@ export default class Start247StreamingCommand extends BaseCommand {
 		await DiscordUtils.sendInfo(
 			context.message,
 			"247 Streaming",
-			"Started continuous top-movie streaming through Meteor/Stremio."
+			"Started continuous movie streaming through Meteor/Stremio."
 		);
 
 		this.runLoop(context).catch(async (error) => {
@@ -95,9 +95,15 @@ export default class Start247StreamingCommand extends BaseCommand {
 
 	private async pickPlayableMovieCandidate(): Promise<{ imdbId: string; query: string; finalUrl: string } | null> {
 		const pages = [1, 2, 3, 4, 5];
+		const genreIds = await this.tmdbService.resolveGenreIdsByName(config.auto247AllowedGenres || []);
 
 		for (const page of pages) {
-			const movies = await this.tmdbService.getTopRatedReleasedMovies(page);
+			const movies = await this.tmdbService.getDiscoverReleasedMovies({
+				page,
+				minYear: config.auto247MinYear,
+				genreIds
+			});
+
 			if (!movies.length) continue;
 
 			const shuffled = [...movies].sort(() => Math.random() - 0.5);
@@ -142,7 +148,6 @@ export default class Start247StreamingCommand extends BaseCommand {
 			const playable = this.stremioService.toPlayableInput(best);
 			if (!playable) return null;
 
-			// Resolve Meteor /play/... URLs to final CDN URL
 			if (/^https?:\/\//i.test(playable) && !playable.includes("youtube.com")) {
 				const response = await fetch(playable, {
 					method: "GET",
