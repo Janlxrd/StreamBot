@@ -342,7 +342,12 @@ export class StreamingService {
 	}
 
 	private async executeStream(inputForFfmpeg: any, streamOpts: any, message: Message, title: string, videoSource: string, audioStreamIndex?: number | null): Promise<void> {
-	const { command, output: ffmpegOutput } = prepareStream(inputForFfmpeg, streamOpts, this.controller!.signal);
+	const ffmpegInput =
+		typeof inputForFfmpeg === "string" && /^https?:\/\//i.test(inputForFfmpeg)
+			? `async:cache:${inputForFfmpeg}`
+			: inputForFfmpeg;
+	
+	const { command, output: ffmpegOutput } = prepareStream(ffmpegInput, streamOpts, this.controller!.signal);
 
 	command.inputOptions([
 		"-fflags", "+genpts",
