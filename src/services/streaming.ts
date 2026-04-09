@@ -1,7 +1,7 @@
 import { Client, Message } from "discord.js-selfbot-v13";
 import { Streamer, Utils, prepareStream, playStream } from "@dank074/discord-video-stream";
 import fs from 'fs';
-import { execFile } from "child_process";
+import { execFile, spawn, ChildProcessWithoutNullStreams } from "child_process";
 import config from "../config.js";
 import { MediaService } from './media.js';
 import { QueueService } from './queue.js';
@@ -18,6 +18,8 @@ export class StreamingService {
 	private streamStatus: StreamStatus;
 	private failedVideos: Set<string> = new Set();
 	private isSkipping: boolean = false;
+	private activeBufferProcess: ChildProcessWithoutNullStreams | null = null;
+	private activeBufferTempFile: string | null = null;
 
 	constructor(client: Client, streamStatus: StreamStatus) {
 		this.streamer = new Streamer(client);
@@ -187,6 +189,91 @@ export class StreamingService {
 		}
 	}
 
+	private getTempBufferDir(): string {
+		return config.previewCacheDir || "./tmp";
+	}
+	
+	private sanitizeFileName(name: string): string {
+		return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim().slice(0, 80) || "stream";
+	}
+	
+	private async wait(ms: number): Promise<void> {
+		return new Promise(resolve => setTimeout(resolve, ms));
+	}
+	
+	private async waitForFileSize(filePath: string, minBytes: number, timeoutMs: number): Promise<void> {
+		const started = Date.now();
+	
+		while (true) {
+			try {
+				const stat = await fs.promises.stat(filePath);
+				if (stat.size >= minBytes) return;
+			} catch {}
+	
+			if (Date.now() - started > timeoutMs) {
+				throw new Error(`Timed out waiting for prebuffer file to reach ${minBytes} bytes`);
+			}
+	
+			await this.wait(1000);
+		}
+	}
+	
+	private async startHttpPrebuffer(videoSource: string, title?: string): Promise<string> {
+		const dir = this.getTempBufferDir();
+		await fs.promises.mkdir(dir, { recursive: true });
+	
+		const tempFile = `${dir}/${Date.now()}-${this.sanitizeFileName(title || "movie")}.mkv`;
+	
+		const args = [
+			"-y",
+			"-rw_timeout", "15000000",
+			"-i", videoSource,
+			"-map", "0:v:0",
+			"-map", "0:a:0?",
+			"-c", "copy",
+			"-f", "matroska",
+			tempFile
+		];
+	
+		const child = spawn("ffmpeg", args, {
+			stdio: ["ignore", "ignore", "pipe"]
+		});
+	
+		child.stderr.on("data", (chunk) => {
+			logger.debug?.(`prebuffer ffmpeg: ${chunk.toString()}`);
+		});
+	
+		child.on("exit", (code, signal) => {
+			logger.info(`Prebuffer process exited (code=${code}, signal=${signal}) for ${tempFile}`);
+		});
+	
+		this.activeBufferProcess = child;
+		this.activeBufferTempFile = tempFile;
+	
+		return tempFile;
+	}
+	
+	private async stopActivePrebuffer(): Promise<void> {
+		if (this.activeBufferProcess && !this.activeBufferProcess.killed) {
+			this.activeBufferProcess.kill("SIGKILL");
+		}
+		this.activeBufferProcess = null;
+	}
+	
+	private async cleanupActivePrebufferFile(): Promise<void> {
+		const tempFile = this.activeBufferTempFile;
+		this.activeBufferTempFile = null;
+	
+		if (!tempFile) return;
+	
+		try {
+			await fs.promises.unlink(tempFile);
+			logger.info(`Deleted prebuffer temp file: ${tempFile}`);
+		} catch (error) {
+			logger.warn(`Failed to delete prebuffer temp file ${tempFile}: ${String(error)}`);
+		}
+	}
+
 	public async playFromQueue(message: Message): Promise<void> {
 		if (this.streamStatus.playing) {
 			await DiscordUtils.sendError(message, 'Already playing a video. Use skip command to skip current video.');
@@ -223,6 +310,8 @@ export class StreamingService {
 			this.streamStatus.manualStop = true;
 			this.controller?.abort();
 			this.streamer.stopStream();
+
+			await this.stopActivePrebuffer();
 
 			const currentItem = this.queueService.getCurrent();
 			const nextItem = this.queueService.skip();
@@ -326,17 +415,14 @@ export class StreamingService {
 	}
 	
 	private async executeStream(inputForFfmpeg: any, streamOpts: any, message: Message, title: string, videoSource: string, audioStreamIndex?: number | null): Promise<void> {
-	const ffmpegInput =
-		typeof inputForFfmpeg === "string" && /^https?:\/\//i.test(inputForFfmpeg)
-			? `async:cache:${inputForFfmpeg}`
-			: inputForFfmpeg;
+	const { command, output: ffmpegOutput } = prepareStream(
+		inputForFfmpeg,
+		streamOpts,
+		this.controller!.signal
+	);
 	
-	const { command, output: ffmpegOutput } = prepareStream(ffmpegInput, streamOpts, this.controller!.signal);
-
 	command.inputOptions([
-		"-fflags", "+genpts",
-		"-rw_timeout", "15000000",
-		"-read_ahead_limit", "-1"
+		"-fflags", "+genpts"
 	]);
 
 	if (audioStreamIndex !== null && audioStreamIndex !== undefined) {
@@ -444,11 +530,16 @@ export class StreamingService {
 		title?: string
 	): Promise<{ inputForFfmpeg: any, tempFilePath: string | null }> {
 		if (this.isHttpUrl(videoSource) && !this.isYouTubeUrl(videoSource)) {
-			return { inputForFfmpeg: videoSource, tempFilePath: null };
+			const tempFilePath = await this.startHttpPrebuffer(videoSource, title);
+	
+			// ~200 MB initial buffer; change if you want
+			await this.waitForFileSize(tempFilePath, 200 * 1024 * 1024, 120000);
+	
+			return { inputForFfmpeg: tempFilePath, tempFilePath };
 		}
-
+	
 		const mediaSource = await this.mediaService.resolveMediaSource(videoSource);
-
+	
 		if (mediaSource && mediaSource.type === 'youtube' && !mediaSource.isLive) {
 			const tempFilePath = await this.handleDownload(message, videoSource, title);
 			if (tempFilePath) {
@@ -456,10 +547,10 @@ export class StreamingService {
 			}
 			throw new Error('Failed to prepare video source due to download failure.');
 		}
-
+	
 		return { inputForFfmpeg: mediaSource ? mediaSource.url : videoSource, tempFilePath: null };
 	}
-
+	
 	private async executeStreamWorkflow(
 		input: any,
 		options: any,
@@ -480,14 +571,19 @@ export class StreamingService {
 			this.queueService.resetCurrentIndex();
 			await this.cleanupStreamStatus();
 		}
-
+	
+		await this.stopActivePrebuffer();
+	
 		if (tempFile) {
 			try {
-				fs.unlinkSync(tempFile);
+				await fs.promises.unlink(tempFile);
+				logger.info(`Deleted temp file: ${tempFile}`);
 			} catch (cleanupError) {
 				logger.error(`Failed to delete temp file ${tempFile}:`, cleanupError);
 			}
 		}
+	
+		await this.cleanupActivePrebufferFile();
 	}
 
 	public async playVideo(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }): Promise<void> {
@@ -546,6 +642,9 @@ export class StreamingService {
 		try {
 			this.controller?.abort();
 			this.streamer.stopStream();
+
+			await this.stopActivePrebuffer();
+			await this.cleanupActivePrebufferFile();
 
 			const hasQueueItems = !this.queueService.isEmpty();
 			if (!hasQueueItems) {
