@@ -577,7 +577,9 @@ export class StreamingService {
 	
 		await this.stopActivePrebuffer();
 	
-		if (tempFile) {
+		const activePrebufferFile = this.activeBufferTempFile;
+	
+		if (tempFile && tempFile !== activePrebufferFile) {
 			try {
 				await fs.promises.unlink(tempFile);
 				logger.info(`Deleted temp file: ${tempFile}`);
