@@ -115,8 +115,11 @@ export class StreamingService {
 
 			const best = scored[0];
 			if (!best) return null;
-
-			// Return audio-stream order, not ffprobe global index
+			
+			if (best.score <= 0) {
+				return null;
+			}
+			
 			return best.audioOrderIndex;
 		} catch (error) {
 			logger.warn("Failed to detect English audio track:", error);
@@ -229,7 +232,7 @@ export class StreamingService {
 			"-rw_timeout", "15000000",
 			"-i", videoSource,
 			"-map", "0:v:0",
-			"-map", "0:a:0?",
+			"-map", "0:a?",
 			"-c", "copy",
 			"-f", "matroska",
 			tempFile
