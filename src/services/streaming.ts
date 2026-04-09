@@ -26,6 +26,9 @@ export class StreamingService {
 		this.mediaService = new MediaService();
 		this.queueService = new QueueService();
 		this.streamStatus = streamStatus;
+		this.cleanupOrphanedPrebufferFiles().catch(err =>
+			logger.warn(`Startup temp cleanup failed: ${String(err)}`)
+		);
 	}
 
 	public getStreamer(): Streamer {
@@ -527,6 +530,30 @@ export class StreamingService {
 		}
 	}
 
+	private async cleanupOrphanedPrebufferFiles(): Promise<void> {
+		try {
+			const dir = this.getTempBufferDir();
+			await fs.promises.mkdir(dir, { recursive: true });
+	
+			const files = await fs.promises.readdir(dir);
+	
+			for (const file of files) {
+				if (!file.endsWith(".mkv")) continue;
+	
+				const fullPath = `${dir}/${file}`;
+	
+				try {
+					await fs.promises.unlink(fullPath);
+					logger.info(`Deleted orphaned prebuffer temp file: ${fullPath}`);
+				} catch (error) {
+					logger.warn(`Failed to delete orphaned prebuffer temp file ${fullPath}: ${String(error)}`);
+				}
+			}
+		} catch (error) {
+			logger.warn(`Failed to clean orphaned prebuffer files: ${String(error)}`);
+		}
+	}
+	
 	private async prepareVideoSource(
 		message: Message,
 		videoSource: string,
@@ -647,19 +674,20 @@ export class StreamingService {
 		try {
 			this.controller?.abort();
 			this.streamer.stopStream();
-
+	
 			await this.stopActivePrebuffer();
 			await this.cleanupActivePrebufferFile();
-
+			await this.cleanupOrphanedPrebufferFiles();
+	
 			const hasQueueItems = !this.queueService.isEmpty();
 			if (!hasQueueItems) {
 				this.streamer.leaveVoice();
 				this.streamStatus.joined = false;
 				this.streamStatus.joinsucc = false;
 			}
-
+	
 			this.streamer.client.user?.setActivity(DiscordUtils.status_idle());
-
+	
 			this.streamStatus.playing = false;
 			this.streamStatus.manualStop = false;
 			this.streamStatus.channelInfo = {
