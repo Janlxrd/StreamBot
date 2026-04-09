@@ -174,9 +174,18 @@ export class StreamingService {
 			const mediaSource = await this.mediaService.resolveMediaSource(videoSource);
 
 			if (mediaSource) {
-				const queueItem = await this.queueService.addToQueue(mediaSource, username);
+				const queueItem = await this.queueService.add(
+					mediaSource.url,
+					title || mediaSource.title || videoSource,
+					username,
+					mediaSource.type || 'url',
+					true,
+					videoSource
+				);
 				await DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
 				return true;
+			}
+			
 			} else {
 				const queueItem = await this.queueService.add(
 					videoSource,
