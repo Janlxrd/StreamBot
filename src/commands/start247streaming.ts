@@ -79,7 +79,7 @@ export default class Start247StreamingCommand extends BaseCommand {
 				const success = await context.streamingService.addToQueue(
 					context.message,
 					candidate.finalUrl,
-					`247: ${candidate.query}`
+					candidate.query
 				);
 
 				if (success && !context.streamStatus.playing) {
