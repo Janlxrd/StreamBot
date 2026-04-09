@@ -185,8 +185,8 @@ export class StreamingService {
 				await DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
 				return true;
 			}
-			
-			} else {
+				
+			else {
 				const queueItem = await this.queueService.add(
 					videoSource,
 					title || videoSource,
