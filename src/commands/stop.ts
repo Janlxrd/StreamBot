@@ -9,7 +9,10 @@ export default class StopCommand extends BaseCommand {
 	aliases = ["leave", "s"];
 
 	async execute(context: CommandContext): Promise<void> {
-		if (!context.streamStatus.joined) {
+		const queueService = context.streamingService.getQueueService();
+		const hasActiveQueueWork = queueService.getLength() > 0 || queueService.getQueueStatus().isPlaying;
+
+		if (!context.streamStatus.joined && !context.streamStatus.playing && !hasActiveQueueWork) {
 			await this.sendError(context.message, '**Already Stopped!**');
 			return;
 		}

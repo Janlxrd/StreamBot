@@ -63,6 +63,34 @@ function parseAdminIds(value: string): string[] {
 	return value.trim() ? [value.trim()] : [];
 }
 
+function parseNumber(value: string | undefined, fallback: number): number {
+	if (!value) return fallback;
+
+	const parsed = parseInt(value, 10);
+	return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const cpuCores = parseNumber(process.env.CPU_CORES, 0);
+const accelerator = (process.env.ACCELERATOR || "").trim().toLowerCase();
+const isHuggingFaceSpace = Boolean(process.env.SPACE_ID || process.env.SPACE_HOST);
+const isHuggingFaceCpuBasic =
+	isHuggingFaceSpace &&
+	(accelerator === "" || accelerator === "none") &&
+	(cpuCores === 0 || cpuCores <= 2);
+const streamProfile = (process.env.STREAM_PROFILE || (isHuggingFaceCpuBasic ? "hf-cpu-basic" : "default")).trim().toLowerCase();
+const isHfCpuBasicProfile = streamProfile === "hf-cpu-basic";
+
+const defaultStreamWidth = isHfCpuBasicProfile ? 854 : 1280;
+const defaultStreamHeight = isHfCpuBasicProfile ? 480 : 720;
+const defaultStreamFps = isHfCpuBasicProfile ? 24 : 30;
+const defaultStreamBitrateKbps = isHfCpuBasicProfile ? 1400 : 2000;
+const defaultStreamMaxBitrateKbps = isHfCpuBasicProfile ? 2000 : 2500;
+const defaultFfmpegThreads = isHfCpuBasicProfile ? 2 : 0;
+const defaultFullCacheRemote = isHfCpuBasicProfile;
+const defaultPreTranscodeBeforePlayback = isHfCpuBasicProfile;
+const defaultRemoteCacheDir = isHuggingFaceSpace ? "/tmp/streambot-remote-cache" : "./tmp/remote-cache";
+const defaultTranscodeCacheDir = isHuggingFaceSpace ? "/tmp/streambot-transcode-cache" : "./tmp/transcode-cache";
+
 export default {
 	// Selfbot options
 	token: process.env.TOKEN || '',
@@ -71,10 +99,13 @@ export default {
 	cmdChannelId: process.env.COMMAND_CHANNEL_ID ? process.env.COMMAND_CHANNEL_ID : '',
 	videoChannelId: process.env.VIDEO_CHANNEL_ID ? process.env.VIDEO_CHANNEL_ID : '',
 	adminIds: process.env.ADMIN_IDS ? parseAdminIds(process.env.ADMIN_IDS) : [],
+	streamProfile,
 
 	// General options
 	videosDir: process.env.VIDEOS_DIR ? process.env.VIDEOS_DIR : './videos',
 	previewCacheDir: process.env.PREVIEW_CACHE_DIR ? process.env.PREVIEW_CACHE_DIR : './tmp/preview-cache',
+	remoteCacheDir: process.env.STREAM_REMOTE_CACHE_DIR ? process.env.STREAM_REMOTE_CACHE_DIR : defaultRemoteCacheDir,
+	transcodeCacheDir: process.env.STREAM_TRANSCODE_CACHE_DIR ? process.env.STREAM_TRANSCODE_CACHE_DIR : defaultTranscodeCacheDir,
 
 	// yt-dlp options
 	ytdlpCookiesPath: process.env.YTDLP_COOKIES_PATH ? process.env.YTDLP_COOKIES_PATH : '',
@@ -82,16 +113,22 @@ export default {
 	// Stream options
 	respect_video_params: process.env.STREAM_RESPECT_VIDEO_PARAMS ? parseBoolean(process.env.STREAM_RESPECT_VIDEO_PARAMS) : false,
 	bitrateOverride: process.env.STREAM_BITRATE_OVERRIDE ? parseBoolean(process.env.STREAM_BITRATE_OVERRIDE) : false,
-	width: process.env.STREAM_WIDTH ? parseInt(process.env.STREAM_WIDTH) : 1280,
-	height: process.env.STREAM_HEIGHT ? parseInt(process.env.STREAM_HEIGHT) : 720,
-	fps: process.env.STREAM_FPS ? parseInt(process.env.STREAM_FPS) : 30,
-	bitrateKbps: process.env.STREAM_BITRATE_KBPS ? parseInt(process.env.STREAM_BITRATE_KBPS) : 1000,
-	maxBitrateKbps: process.env.STREAM_MAX_BITRATE_KBPS ? parseInt(process.env.STREAM_MAX_BITRATE_KBPS) : 2500,
-	maxWidth: process.env.STREAM_MAX_WIDTH ? parseInt(process.env.STREAM_MAX_WIDTH) : 0,
-	maxHeight: process.env.STREAM_MAX_HEIGHT ? parseInt(process.env.STREAM_MAX_HEIGHT) : 0,
+	width: parseNumber(process.env.STREAM_WIDTH, defaultStreamWidth),
+	height: parseNumber(process.env.STREAM_HEIGHT, defaultStreamHeight),
+	fps: parseNumber(process.env.STREAM_FPS, defaultStreamFps),
+	bitrateKbps: parseNumber(process.env.STREAM_BITRATE_KBPS, defaultStreamBitrateKbps),
+	maxBitrateKbps: parseNumber(process.env.STREAM_MAX_BITRATE_KBPS, defaultStreamMaxBitrateKbps),
+	maxWidth: parseNumber(process.env.STREAM_MAX_WIDTH, 0),
+	maxHeight: parseNumber(process.env.STREAM_MAX_HEIGHT, 0),
 	hardwareAcceleratedDecoding: process.env.STREAM_HARDWARE_ACCELERATION ? parseBoolean(process.env.STREAM_HARDWARE_ACCELERATION) : false,
 	h26xPreset: process.env.STREAM_H26X_PRESET ? parsePreset(process.env.STREAM_H26X_PRESET) : 'ultrafast',
 	videoCodec: process.env.STREAM_VIDEO_CODEC ? parseVideoCodec(process.env.STREAM_VIDEO_CODEC) : 'H264',
+	ffmpegVideoEncoder: process.env.STREAM_FFMPEG_VIDEO_ENCODER ? process.env.STREAM_FFMPEG_VIDEO_ENCODER.trim() : '',
+	ffmpegThreads: parseNumber(process.env.STREAM_FFMPEG_THREADS, defaultFfmpegThreads),
+	noTranscoding: process.env.STREAM_NO_TRANSCODING ? parseBoolean(process.env.STREAM_NO_TRANSCODING) : false,
+	preTranscodeBeforePlayback: process.env.STREAM_PRETRANSCODE_BEFORE_PLAYBACK ? parseBoolean(process.env.STREAM_PRETRANSCODE_BEFORE_PLAYBACK) : defaultPreTranscodeBeforePlayback,
+	fullCacheRemote: process.env.STREAM_FULL_CACHE_REMOTE ? parseBoolean(process.env.STREAM_FULL_CACHE_REMOTE) : defaultFullCacheRemote,
+	remotePrebufferMb: parseNumber(process.env.STREAM_REMOTE_PREBUFFER_MB, 200),
 
 	// Videos server options
 	server_enabled: process.env.SERVER_ENABLED ? parseBoolean(process.env.SERVER_ENABLED) : false,

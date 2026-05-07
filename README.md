@@ -227,6 +227,12 @@ VIDEOS_DIR="./videos"
 
 # Directory for caching video preview thumbnails
 PREVIEW_CACHE_DIR="./tmp/preview-cache"
+
+# Directory for temporary remote movie cache files
+STREAM_REMOTE_CACHE_DIR="./tmp/remote-cache"
+
+# Directory for temporary pre-transcoded playback files
+STREAM_TRANSCODE_CACHE_DIR="./tmp/transcode-cache"
 ```
 
 ### 🍪 Content Source Configuration
@@ -241,6 +247,7 @@ YTDLP_COOKIES_PATH=""
 
 ```bash
 # Video Quality Settings
+STREAM_PROFILE=""                     # Leave empty for auto; use "hf-cpu-basic" to force Hugging Face CPU Basic settings
 STREAM_RESPECT_VIDEO_PARAMS="false"  # Use original video parameters if true
 STREAM_BITRATE_OVERRIDE="false"      # If true, use STREAM_BITRATE_KBPS even when respecting video params
 STREAM_WIDTH="1280"                  # Output resolution width
@@ -256,11 +263,27 @@ STREAM_MAX_BITRATE_KBPS="2500"       # Maximum allowed bitrate
 # Performance & Encoding
 STREAM_HARDWARE_ACCELERATION="false" # Use GPU acceleration if available
 STREAM_VIDEO_CODEC="H264"            # Codec: H264, H265, VP8, VP9, AV1
+STREAM_FFMPEG_VIDEO_ENCODER=""       # Optional FFmpeg encoder override, e.g. h264_nvenc
+STREAM_FFMPEG_THREADS="0"            # Optional FFmpeg thread limit (0 = auto)
+STREAM_NO_TRANSCODING="false"        # Skip video transcoding for already Discord-friendly sources
+STREAM_PRETRANSCODE_BEFORE_PLAYBACK="false" # Pre-transcode before playback for smoother CPU-only VPS streaming
+
+# Remote Source Cache
+STREAM_FULL_CACHE_REMOTE="false"     # Fully cache remote HTTP movies before playback
+STREAM_REMOTE_PREBUFFER_MB="200"     # Initial remote buffer size when full cache is disabled
 
 # H.264/H.265 Encoding Preset (quality vs speed tradeoff)
 # Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
 STREAM_H26X_PRESET="ultrafast"
 ```
+
+For Hugging Face CPU Basic Spaces, leave `STREAM_PROFILE` unset for auto-detection or set:
+
+```bash
+STREAM_PROFILE="hf-cpu-basic"
+```
+
+That profile defaults to 854x480, 24 FPS, 1400-2000 Kbps, two FFmpeg threads, full remote cache, and pre-transcoding before playback.
 
 ### 🌐 Web Interface Configuration
 

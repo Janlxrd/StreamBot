@@ -1,6 +1,7 @@
 import { Client, Message } from "discord.js-selfbot-v13";
 import { Streamer, Utils, prepareStream, playStream } from "@dank074/discord-video-stream";
 import fs from 'fs';
+import path from 'path';
 import { execFile, spawn, ChildProcessWithoutNullStreams } from "child_process";
 import config from "../config.js";
 import { MediaService } from './media.js';
@@ -20,6 +21,8 @@ export class StreamingService {
 	private isSkipping: boolean = false;
 	private activeBufferProcess: ChildProcessWithoutNullStreams | null = null;
 	private activeBufferTempFile: string | null = null;
+	private activeTranscodeProcess: ChildProcessWithoutNullStreams | null = null;
+	private activeTranscodeTempFile: string | null = null;
 
 	constructor(client: Client, streamStatus: StreamStatus) {
 		this.streamer = new Streamer(client);
@@ -28,6 +31,9 @@ export class StreamingService {
 		this.streamStatus = streamStatus;
 		this.cleanupOrphanedPrebufferFiles().catch(err =>
 			logger.warn(`Startup temp cleanup failed: ${String(err)}`)
+		);
+		this.cleanupOrphanedTranscodeFiles().catch(err =>
+			logger.warn(`Startup transcode temp cleanup failed: ${String(err)}`)
 		);
 	}
 
@@ -205,11 +211,22 @@ export class StreamingService {
 	}
 
 	private getTempBufferDir(): string {
-		return config.previewCacheDir || "./tmp";
+		return config.remoteCacheDir || config.previewCacheDir || "./tmp";
+	}
+
+	private getTranscodeCacheDir(): string {
+		return config.transcodeCacheDir || "./tmp/transcode-cache";
 	}
 	
 	private sanitizeFileName(name: string): string {
 		return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, "").trim().slice(0, 80) || "stream";
+	}
+
+	private getRemotePrebufferBytes(): number {
+		const prebufferMb = Number(config.remotePrebufferMb);
+		const safePrebufferMb = Number.isFinite(prebufferMb) && prebufferMb > 0 ? prebufferMb : 200;
+
+		return safePrebufferMb * 1024 * 1024;
 	}
 	
 	private async wait(ms: number): Promise<void> {
@@ -233,12 +250,50 @@ export class StreamingService {
 		}
 	}
 	
-	private async startHttpPrebuffer(videoSource: string, title?: string): Promise<string> {
+	private waitForBufferProcess(child: ChildProcessWithoutNullStreams, tempFile: string): Promise<void> {
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const finish = (error?: Error) => {
+				if (settled) return;
+				settled = true;
+				if (this.activeBufferProcess === child) {
+					this.activeBufferProcess = null;
+				}
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve();
+			};
+
+			child.once("error", (error) => {
+				finish(error instanceof Error ? error : new Error(String(error)));
+			});
+
+			child.once("exit", (code, signal) => {
+				logger.info(`Prebuffer process exited (code=${code}, signal=${signal}) for ${tempFile}`);
+
+				if (code === 0) {
+					finish();
+					return;
+				}
+
+				if (this.streamStatus.manualStop || signal) {
+					finish(new Error("Remote cache was stopped before it completed."));
+					return;
+				}
+
+				finish(new Error(`Remote cache ffmpeg failed with exit code ${code ?? "unknown"}.`));
+			});
+		});
+	}
+
+	private async startHttpPrebuffer(videoSource: string, title?: string): Promise<{ tempFile: string, completion: Promise<void> }> {
 		const dir = this.getTempBufferDir();
 		await fs.promises.mkdir(dir, { recursive: true });
-	
-		const tempFile = `${dir}/${Date.now()}-${this.sanitizeFileName(title || "movie")}.mkv`;
-	
+
+		const tempFile = path.join(dir, `${Date.now()}-${this.sanitizeFileName(title || "movie")}.mkv`);
+
 		const args = [
 			"-y",
 			"-rw_timeout", "15000000",
@@ -249,30 +304,38 @@ export class StreamingService {
 			"-f", "matroska",
 			tempFile
 		];
-	
+
 		const child = spawn("ffmpeg", args, {
 			stdio: ["ignore", "ignore", "pipe"]
 		});
-	
+
 		child.stderr.on("data", (chunk) => {
 			logger.debug?.(`prebuffer ffmpeg: ${chunk.toString()}`);
 		});
-	
-		child.on("exit", (code, signal) => {
-			logger.info(`Prebuffer process exited (code=${code}, signal=${signal}) for ${tempFile}`);
-		});
-	
+
 		this.activeBufferProcess = child;
 		this.activeBufferTempFile = tempFile;
-	
-		return tempFile;
+
+		const completion = this.waitForBufferProcess(child, tempFile);
+		void completion.catch(error => {
+			logger.warn(`Remote cache process did not complete cleanly for ${tempFile}: ${String(error)}`);
+		});
+
+		return { tempFile, completion };
 	}
-	
+
 	private async stopActivePrebuffer(): Promise<void> {
 		if (this.activeBufferProcess && !this.activeBufferProcess.killed) {
 			this.activeBufferProcess.kill("SIGKILL");
 		}
 		this.activeBufferProcess = null;
+	}
+
+	private async stopActiveTranscode(): Promise<void> {
+		if (this.activeTranscodeProcess && !this.activeTranscodeProcess.killed) {
+			this.activeTranscodeProcess.kill("SIGKILL");
+		}
+		this.activeTranscodeProcess = null;
 	}
 	
 	private async cleanupActivePrebufferFile(): Promise<void> {
@@ -286,6 +349,20 @@ export class StreamingService {
 			logger.info(`Deleted prebuffer temp file: ${tempFile}`);
 		} catch (error) {
 			logger.warn(`Failed to delete prebuffer temp file ${tempFile}: ${String(error)}`);
+		}
+	}
+
+	private async cleanupActiveTranscodeFile(): Promise<void> {
+		const tempFile = this.activeTranscodeTempFile;
+		this.activeTranscodeTempFile = null;
+
+		if (!tempFile) return;
+
+		try {
+			await fs.promises.unlink(tempFile);
+			logger.info(`Deleted transcode temp file: ${tempFile}`);
+		} catch (error) {
+			logger.warn(`Failed to delete transcode temp file ${tempFile}: ${String(error)}`);
 		}
 	}
 
@@ -327,6 +404,7 @@ export class StreamingService {
 			this.streamer.stopStream();
 
 			await this.stopActivePrebuffer();
+			await this.stopActiveTranscode();
 
 			const currentItem = this.queueService.getCurrent();
 			const nextItem = this.queueService.skip();
@@ -407,25 +485,209 @@ export class StreamingService {
 			throw new Error('Voice connection is not established');
 		}
 	}
+
+	private getPositiveNumber(value: number | undefined): number | undefined {
+		if (!Number.isFinite(value) || !value || value <= 0) {
+			return undefined;
+		}
+
+		return value;
+	}
+
+	private getOutputDimensions(videoParams?: { width: number, height: number }): { width?: number, height?: number } {
+		const configuredWidth = this.getPositiveNumber(config.width);
+		const configuredHeight = this.getPositiveNumber(config.height);
+		const maxWidth = this.getPositiveNumber(config.maxWidth);
+		const maxHeight = this.getPositiveNumber(config.maxHeight);
+		const targetWidth = maxWidth && configuredWidth ? Math.min(configuredWidth, maxWidth) : configuredWidth || maxWidth;
+		const targetHeight = maxHeight && configuredHeight ? Math.min(configuredHeight, maxHeight) : configuredHeight || maxHeight;
+
+		if (videoParams && targetWidth && targetHeight) {
+			const widthScale = targetWidth / videoParams.width;
+			const heightScale = targetHeight / videoParams.height;
+
+			if (widthScale >= 1 && heightScale >= 1) {
+				return {};
+			}
+
+			return widthScale < heightScale
+				? { width: targetWidth }
+				: { height: targetHeight };
+		}
+
+		if (targetHeight) {
+			return { height: targetHeight };
+		}
+
+		if (targetWidth) {
+			return { width: targetWidth };
+		}
+
+		return {};
+	}
+
+	private getCustomFfmpegFlags(): string[] | undefined {
+		const flags: string[] = [];
+		const encoder = String(config.ffmpegVideoEncoder || "").trim();
+		const threads = this.getPositiveNumber(config.ffmpegThreads);
+
+		if (encoder) {
+			flags.push("-c:v", encoder);
+		}
+
+		if (threads) {
+			flags.push("-threads", String(threads));
+		}
+
+		return flags.length ? flags : undefined;
+	}
+
+	private getTranscodeVideoFilter(): string {
+		const targetWidth = this.getPositiveNumber(config.maxWidth) || this.getPositiveNumber(config.width) || 1280;
+		const targetHeight = this.getPositiveNumber(config.maxHeight) || this.getPositiveNumber(config.height) || 720;
+
+		return `scale='min(${targetWidth},iw)':'min(${targetHeight},ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2`;
+	}
+
+	private async waitForTranscodeProcess(child: ChildProcessWithoutNullStreams, tempFile: string): Promise<void> {
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const finish = (error?: Error) => {
+				if (settled) return;
+				settled = true;
+				if (this.activeTranscodeProcess === child) {
+					this.activeTranscodeProcess = null;
+				}
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve();
+			};
+
+			child.once("error", (error) => {
+				finish(error instanceof Error ? error : new Error(String(error)));
+			});
+
+			child.once("exit", (code, signal) => {
+				logger.info(`Pre-transcode process exited (code=${code}, signal=${signal}) for ${tempFile}`);
+
+				if (code === 0) {
+					finish();
+					return;
+				}
+
+				if (this.streamStatus.manualStop || signal) {
+					finish(new Error("Pre-transcode was stopped before it completed."));
+					return;
+				}
+
+				finish(new Error(`Pre-transcode ffmpeg failed with exit code ${code ?? "unknown"}.`));
+			});
+		});
+	}
+
+	private async transcodeForPlayback(message: Message, inputFile: string, title?: string): Promise<string> {
+		const dir = this.getTranscodeCacheDir();
+		await fs.promises.mkdir(dir, { recursive: true });
+
+		const outputFile = path.join(dir, `${Date.now()}-${this.sanitizeFileName(title || "movie")}.mp4`);
+		const bitrate = this.getPositiveNumber(config.bitrateKbps) || 2000;
+		const maxBitrate = this.getPositiveNumber(config.maxBitrateKbps) || bitrate;
+		const fps = this.getPositiveNumber(config.fps) || 24;
+		const preset = config.h26xPreset || "ultrafast";
+		const threads = this.getPositiveNumber(config.ffmpegThreads);
+
+		const statusMessage = await message.reply(
+			`Preparing optimized playback cache for \`${title || 'movie'}\`...`
+		).catch(error => {
+			logger.warn("Failed to send pre-transcode message:", error);
+			return null;
+		});
+
+		const args = [
+			"-y",
+			"-i", inputFile,
+			"-map", "0:v:0",
+			"-map", "0:a?",
+			"-vf", this.getTranscodeVideoFilter(),
+			"-r", String(fps),
+			"-c:v", "libx264",
+			"-preset", preset,
+			"-b:v", `${bitrate}k`,
+			"-maxrate", `${maxBitrate}k`,
+			"-bufsize", `${maxBitrate * 2}k`,
+			"-pix_fmt", "yuv420p",
+			"-c:a", "aac",
+			"-b:a", "128k",
+			"-ac", "2",
+			"-movflags", "+faststart"
+		];
+
+		if (threads) {
+			args.push("-threads", String(threads));
+		}
+
+		args.push(outputFile);
+
+		const child = spawn("ffmpeg", args, {
+			stdio: ["ignore", "ignore", "pipe"]
+		});
+
+		child.stderr.on("data", (chunk) => {
+			logger.debug?.(`pre-transcode ffmpeg: ${chunk.toString()}`);
+		});
+
+		this.activeTranscodeProcess = child;
+		this.activeTranscodeTempFile = outputFile;
+
+		try {
+			await this.waitForTranscodeProcess(child, outputFile);
+			await this.waitForFileSize(outputFile, 1, 5000);
+			if (statusMessage) {
+				await statusMessage.delete().catch(error =>
+					logger.warn("Failed to delete pre-transcode message:", error)
+				);
+			}
+			return outputFile;
+		} catch (error) {
+			if (statusMessage) {
+				await statusMessage.edit(
+					`Failed to prepare optimized playback cache for \`${title || 'movie'}\`.`
+				).catch(editError =>
+					logger.warn("Failed to edit pre-transcode message:", editError)
+				);
+			}
+			throw error;
+		}
+	}
 	
-	private setupStreamConfiguration(videoParams?: { width: number, height: number, fps?: number, bitrate?: number }): any {
-		let frameRate = videoParams?.fps || config.fps;
-		let bitrateVideo = config.bitrateKbps;
+	private setupStreamConfiguration(videoParams?: { width: number, height: number, fps?: number, bitrate?: number }, forceNoTranscoding: boolean = false): any {
+		const sourceFps = videoParams?.fps && videoParams.fps > 0 ? videoParams.fps : undefined;
+		const configuredFps = this.getPositiveNumber(config.fps) || 30;
+		const configuredBitrate = this.getPositiveNumber(config.bitrateKbps) || 2000;
+		const maxBitrate = this.getPositiveNumber(config.maxBitrateKbps) || configuredBitrate;
+		let frameRate = sourceFps ? Math.min(sourceFps, configuredFps) : configuredFps;
+		let bitrateVideo = configuredBitrate;
+		const dimensions = this.getOutputDimensions(videoParams);
 	
 		if (videoParams && videoParams.bitrate && !config.bitrateOverride) {
-			bitrateVideo = videoParams.bitrate;
+			bitrateVideo = Math.min(videoParams.bitrate, maxBitrate);
 		}
 	
 		return {
-			width: undefined,
-			height: undefined,
+			noTranscoding: forceNoTranscoding || config.noTranscoding,
+			width: dimensions.width,
+			height: dimensions.height,
 			frameRate,
+			fps: frameRate,
 			bitrateVideo,
-			bitrateVideoMax: config.maxBitrateKbps,
+			bitrateVideoMax: maxBitrate,
 			videoCodec: Utils.normalizeVideoCodec(config.videoCodec),
 			hardwareAcceleratedDecoding: config.hardwareAcceleratedDecoding,
 			minimizeLatency: false,
-			h26xPreset: config.h26xPreset
+			h26xPreset: config.h26xPreset,
+			customFfmpegFlags: this.getCustomFfmpegFlags()
 		};
 	}
 	
@@ -549,7 +811,7 @@ export class StreamingService {
 			for (const file of files) {
 				if (!file.endsWith(".mkv")) continue;
 	
-				const fullPath = `${dir}/${file}`;
+				const fullPath = path.join(dir, file);
 	
 				try {
 					await fs.promises.unlink(fullPath);
@@ -562,19 +824,84 @@ export class StreamingService {
 			logger.warn(`Failed to clean orphaned prebuffer files: ${String(error)}`);
 		}
 	}
+
+	private async cleanupOrphanedTranscodeFiles(): Promise<void> {
+		try {
+			const dir = this.getTranscodeCacheDir();
+			await fs.promises.mkdir(dir, { recursive: true });
+
+			const files = await fs.promises.readdir(dir);
+
+			for (const file of files) {
+				if (!file.endsWith(".mp4")) continue;
+
+				const fullPath = path.join(dir, file);
+
+				try {
+					await fs.promises.unlink(fullPath);
+					logger.info(`Deleted orphaned transcode temp file: ${fullPath}`);
+				} catch (error) {
+					logger.warn(`Failed to delete orphaned transcode temp file ${fullPath}: ${String(error)}`);
+				}
+			}
+		} catch (error) {
+			logger.warn(`Failed to clean orphaned transcode files: ${String(error)}`);
+		}
+	}
 	
 	private async prepareVideoSource(
 		message: Message,
 		videoSource: string,
 		title?: string
-	): Promise<{ inputForFfmpeg: any, tempFilePath: string | null }> {
+	): Promise<{ inputForFfmpeg: any, tempFilePaths: string[], forceNoTranscoding: boolean }> {
+		const maybePreTranscode = async (input: string, tempFilePaths: string[] = []) => {
+			if (!config.preTranscodeBeforePlayback) {
+				return { inputForFfmpeg: input, tempFilePaths, forceNoTranscoding: false };
+			}
+
+			const outputFile = await this.transcodeForPlayback(message, input, title);
+			return {
+				inputForFfmpeg: outputFile,
+				tempFilePaths: [...tempFilePaths, outputFile],
+				forceNoTranscoding: true
+			};
+		};
+
 		if (this.isHttpUrl(videoSource) && !this.isYouTubeUrl(videoSource)) {
-			const tempFilePath = await this.startHttpPrebuffer(videoSource, title);
+			const { tempFile: tempFilePath, completion } = await this.startHttpPrebuffer(videoSource, title);
+
+			if (config.fullCacheRemote || config.preTranscodeBeforePlayback) {
+				const cacheMessage = await message.reply(
+					`Downloading \`${title || 'remote movie'}\` to cache before playback starts...`
+				).catch(error => {
+					logger.warn("Failed to send remote cache message:", error);
+					return null;
+				});
+
+				try {
+					await completion;
+					await this.waitForFileSize(tempFilePath, 1, 5000);
+
+					if (cacheMessage) {
+						await cacheMessage.delete().catch(error =>
+							logger.warn("Failed to delete remote cache message:", error)
+						);
+					}
+				} catch (error) {
+					if (cacheMessage) {
+						await cacheMessage.edit(
+							`Failed to cache \`${title || 'remote movie'}\` before playback.`
+						).catch(editError =>
+							logger.warn("Failed to edit remote cache message:", editError)
+						);
+					}
+					throw error;
+				}
+			} else {
+				await this.waitForFileSize(tempFilePath, this.getRemotePrebufferBytes(), 120000);
+			}
 	
-			// ~200 MB initial buffer; change if you want
-			await this.waitForFileSize(tempFilePath, 200 * 1024 * 1024, 120000);
-	
-			return { inputForFfmpeg: tempFilePath, tempFilePath };
+			return maybePreTranscode(tempFilePath, [tempFilePath]);
 		}
 	
 		const mediaSource = await this.mediaService.resolveMediaSource(videoSource);
@@ -582,12 +909,18 @@ export class StreamingService {
 		if (mediaSource && mediaSource.type === 'youtube' && !mediaSource.isLive) {
 			const tempFilePath = await this.handleDownload(message, videoSource, title);
 			if (tempFilePath) {
-				return { inputForFfmpeg: tempFilePath, tempFilePath };
+				return maybePreTranscode(tempFilePath, [tempFilePath]);
 			}
 			throw new Error('Failed to prepare video source due to download failure.');
 		}
+
+		const resolvedInput = mediaSource ? mediaSource.url : videoSource;
+
+		if (typeof resolvedInput === "string" && fs.existsSync(resolvedInput) && fs.lstatSync(resolvedInput).isFile()) {
+			return maybePreTranscode(resolvedInput);
+		}
 	
-		return { inputForFfmpeg: mediaSource ? mediaSource.url : videoSource, tempFilePath: null };
+		return { inputForFfmpeg: resolvedInput, tempFilePaths: [], forceNoTranscoding: false };
 	}
 	
 	private async executeStreamWorkflow(
@@ -602,7 +935,10 @@ export class StreamingService {
 		await this.executeStream(input, options, message, title, source, audioStreamIndex);
 	}
 
-	private async finalizeStream(message: Message, tempFile: string | null): Promise<void> {
+	private async finalizeStream(message: Message, tempFiles: string[]): Promise<void> {
+		const activePrebufferFile = this.activeBufferTempFile;
+		const activeTranscodeFile = this.activeTranscodeTempFile;
+
 		if (!this.streamStatus.manualStop && this.controller && !this.controller.signal.aborted) {
 			await this.handleQueueAdvancement(message);
 		} else {
@@ -612,10 +948,13 @@ export class StreamingService {
 		}
 	
 		await this.stopActivePrebuffer();
+		await this.stopActiveTranscode();
 	
-		const activePrebufferFile = this.activeBufferTempFile;
-	
-		if (tempFile && tempFile !== activePrebufferFile) {
+		for (const tempFile of tempFiles) {
+			if (tempFile === activePrebufferFile || tempFile === activeTranscodeFile) {
+				continue;
+			}
+
 			try {
 				await fs.promises.unlink(tempFile);
 				logger.info(`Deleted temp file: ${tempFile}`);
@@ -625,6 +964,7 @@ export class StreamingService {
 		}
 	
 		await this.cleanupActivePrebufferFile();
+		await this.cleanupActiveTranscodeFile();
 	}
 
 	public async playVideo(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }): Promise<void> {
@@ -638,10 +978,10 @@ export class StreamingService {
 			}
 		}
 
-		let tempFile: string | null = null;
+		let tempFiles: string[] = [];
 		try {
-			const { inputForFfmpeg, tempFilePath } = await this.prepareVideoSource(message, videoSource, title);
-			tempFile = tempFilePath;
+			const { inputForFfmpeg, tempFilePaths, forceNoTranscoding } = await this.prepareVideoSource(message, videoSource, title);
+			tempFiles = tempFilePaths;
 
 			logger.info(`FFmpeg input source: ${inputForFfmpeg}`);
 
@@ -660,7 +1000,7 @@ export class StreamingService {
 
 			logger.info(`Final selected audio stream index: ${audioStreamIndex}`);
 
-			const streamOpts = this.setupStreamConfiguration(videoParams);
+			const streamOpts = this.setupStreamConfiguration(videoParams, forceNoTranscoding);
 			await this.executeStreamWorkflow(
 				inputForFfmpeg,
 				streamOpts,
@@ -671,11 +1011,16 @@ export class StreamingService {
 			);
 
 		} catch (error) {
-			await ErrorUtils.handleError(error, `playing video: ${title || videoSource}`);
+			if (this.streamStatus.manualStop) {
+				logger.info(`Stopped before or during playback: ${title || videoSource}`);
+			} else {
+				await ErrorUtils.handleError(error, `playing video: ${title || videoSource}`);
+				this.markVideoAsFailed(videoSource);
+			}
+
 			if (this.controller && !this.controller.signal.aborted) this.controller.abort();
-			this.markVideoAsFailed(videoSource);
 		} finally {
-			await this.finalizeStream(message, tempFile);
+			await this.finalizeStream(message, tempFiles);
 		}
 	}
 
@@ -685,8 +1030,11 @@ export class StreamingService {
 			this.streamer.stopStream();
 	
 			await this.stopActivePrebuffer();
+			await this.stopActiveTranscode();
 			await this.cleanupActivePrebufferFile();
+			await this.cleanupActiveTranscodeFile();
 			await this.cleanupOrphanedPrebufferFiles();
+			await this.cleanupOrphanedTranscodeFiles();
 	
 			const hasQueueItems = !this.queueService.isEmpty();
 			if (!hasQueueItems) {

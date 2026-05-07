@@ -39,6 +39,9 @@ export default class ConfigCommand extends BaseCommand {
 
 	private async showConfig(context: CommandContext): Promise<void> {
 		const configInfo = [
+			"**Profile:**",
+			`• streamProfile: ${config.streamProfile}`,
+			"",
 			"**Stream Options:**",
 			`• respect_video_params: ${config.respect_video_params}`,
 			`• bitrateOverride: ${config.bitrateOverride}`,
@@ -52,10 +55,18 @@ export default class ConfigCommand extends BaseCommand {
 			`• hardwareAcceleratedDecoding: ${config.hardwareAcceleratedDecoding}`,
 			`• h26xPreset: ${config.h26xPreset}`,
 			`• videoCodec: ${config.videoCodec}`,
+			`• ffmpegVideoEncoder: ${config.ffmpegVideoEncoder || '(auto)'}`,
+			`• ffmpegThreads: ${config.ffmpegThreads || 'auto'}`,
+			`• noTranscoding: ${config.noTranscoding}`,
+			`• preTranscodeBeforePlayback: ${config.preTranscodeBeforePlayback}`,
+			`• fullCacheRemote: ${config.fullCacheRemote}`,
+			`• remotePrebufferMb: ${config.remotePrebufferMb}`,
 			"",
 			"**General Options:**",
 			`• videosDir: ${config.videosDir}`,
 			`• previewCacheDir: ${config.previewCacheDir}`,
+			`• remoteCacheDir: ${config.remoteCacheDir}`,
+			`• transcodeCacheDir: ${config.transcodeCacheDir}`,
 			"",
 			"**yt-dlp Options:**",
 			`• ytdlpCookiesPath: ${config.ytdlpCookiesPath || '(not set)'}`,
@@ -95,6 +106,9 @@ export default class ConfigCommand extends BaseCommand {
 				case 'respect_video_params':
 				case 'bitrateOverride':
 				case 'hardwareAcceleratedDecoding':
+				case 'noTranscoding':
+				case 'preTranscodeBeforePlayback':
+				case 'fullCacheRemote':
 					const boolValue = parseBoolean(value);
 					(config as any)[key] = boolValue;
 					await this.sendSuccess(context.message, `Set ${key} to \`${boolValue}\``);
@@ -109,6 +123,8 @@ export default class ConfigCommand extends BaseCommand {
 				case 'maxBitrateKbps':
 				case 'maxWidth':
 				case 'maxHeight':
+				case 'ffmpegThreads':
+				case 'remotePrebufferMb':
 					const numValue = parseInt(value);
 					
 					// Validate non-negative
@@ -118,7 +134,7 @@ export default class ConfigCommand extends BaseCommand {
 					}
 					
 					// Validate positive for essential params
-					if (['width', 'height', 'fps', 'bitrateKbps', 'maxBitrateKbps'].includes(key) && numValue === 0) {
+					if (['width', 'height', 'fps', 'bitrateKbps', 'maxBitrateKbps', 'remotePrebufferMb'].includes(key) && numValue === 0) {
 						await this.sendError(context.message, `Invalid number value: ${value}. Must be greater than 0.`);
 						return;
 					}
@@ -155,6 +171,9 @@ export default class ConfigCommand extends BaseCommand {
 				// String parameters
 				case 'videosDir':
 				case 'previewCacheDir':
+				case 'remoteCacheDir':
+				case 'transcodeCacheDir':
+				case 'ffmpegVideoEncoder':
 				case 'ytdlpCookiesPath':
 					(config as any)[key] = value;
 					await this.sendSuccess(context.message, `Set ${key} to \`${value}\``);
