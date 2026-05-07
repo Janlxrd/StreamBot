@@ -90,3 +90,5 @@ Confirmation checklist for an existing Hugging Face Space:
 - `STREAM_FFMPEG_VIDEO_ENCODER` should not exist, or should be empty.
 - `STREAM_REMOTE_PREBUFFER_MB` is optional.
 - After the Space rebuilds, run the Discord `config` command and confirm `streamProfile=hf-cpu-basic`, `width=854`, `height=480`, `fps=24`, `bitrateKbps=1400`, `maxBitrateKbps=2000`, `fullCacheRemote=true`, `preTranscodeBeforePlayback=true`, `noTranscoding=false`, and `ffmpegThreads=2`.
+
+Docker Compose note: when running outside Hugging Face, Spaces Variables/Secrets are not automatically available. If the compose file references `.env`, create `/path/to/project/.env` on that machine with the same values before running `docker compose up`.
