@@ -230,6 +230,10 @@ VIDEO_CHANNEL_ID="VIDEO_CHANNEL_ID"
 #   ADMIN_IDS="123456789,987654321"
 #   ADMIN_IDS=["123456789","987654321"]
 ADMIN_IDS=["YOUR_USER_ID_HERE"]
+
+# Discord acknowledgement behavior
+DISCORD_REACTIONS_ENABLED=""          # Leave empty for profile default; set false if reactions time out
+DISCORD_SEND_TIMEOUT_MS=""            # Leave empty for profile default; hf-cpu-basic uses 1500ms
 ```
 
 ### 📁 File Management

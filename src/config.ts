@@ -90,6 +90,7 @@ const defaultFullCacheRemote = isHfCpuBasicProfile;
 const defaultPreTranscodeBeforePlayback = isHfCpuBasicProfile;
 const defaultRemoteCacheDir = isHuggingFaceSpace ? "/tmp/streambot-remote-cache" : "./tmp/remote-cache";
 const defaultTranscodeCacheDir = isHuggingFaceSpace ? "/tmp/streambot-transcode-cache" : "./tmp/transcode-cache";
+const defaultDiscordSendTimeoutMs = isHfCpuBasicProfile ? 1500 : 5000;
 
 export default {
 	// Selfbot options
@@ -100,6 +101,8 @@ export default {
 	videoChannelId: process.env.VIDEO_CHANNEL_ID ? process.env.VIDEO_CHANNEL_ID : '',
 	adminIds: process.env.ADMIN_IDS ? parseAdminIds(process.env.ADMIN_IDS) : [],
 	streamProfile,
+	discordReactionsEnabled: process.env.DISCORD_REACTIONS_ENABLED ? parseBoolean(process.env.DISCORD_REACTIONS_ENABLED) : !isHfCpuBasicProfile,
+	discordSendTimeoutMs: parseNumber(process.env.DISCORD_SEND_TIMEOUT_MS, defaultDiscordSendTimeoutMs),
 
 	// General options
 	videosDir: process.env.VIDEOS_DIR ? process.env.VIDEOS_DIR : './videos',

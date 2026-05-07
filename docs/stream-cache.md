@@ -101,3 +101,6 @@ Space metadata note: Hugging Face Spaces requires YAML front matter at the very 
 - The queue URL path adds the item before sending the Discord success message, so the abort is usually a failed Discord reaction/reply rather than a media resolution failure.
 - Updated shared Discord send helpers so reactions, replies, and channel sends are best-effort. A transient Discord API abort now logs a warning instead of making the command fail.
 - Updated `help`, `ping`, `preview`, `queue`, and unknown-command handling to use the safer helpers where practical.
+- Added `DISCORD_REACTIONS_ENABLED`, defaulting to `false` for `hf-cpu-basic`, because reaction requests were timing out and delaying command replies.
+- Added `DISCORD_SEND_TIMEOUT_MS`, defaulting to `1500` for `hf-cpu-basic`, so Discord status messages cannot block cache/transcode/playback progress for 30 seconds.
+- Made streaming status messages fire-and-forget in remote cache, YouTube download, and pre-transcode paths. Playback preparation now continues even when those acknowledgements fail.

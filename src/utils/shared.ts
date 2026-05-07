@@ -11,45 +11,58 @@ function formatDiscordSendError(error: any): string {
 	return String(error);
 }
 
-async function safeReact(message: Message, emoji: string): Promise<void> {
-	try {
-		await message.react(emoji);
-	} catch (error) {
-		logger.warn(`Discord reaction failed (${emoji}): ${formatDiscordSendError(error)}`);
+async function runDiscordOperation(label: string, operation: () => Promise<unknown>): Promise<void> {
+	const timeoutMs = Number(config.discordSendTimeoutMs) > 0 ? Number(config.discordSendTimeoutMs) : 1500;
+
+	const guardedOperation = operation()
+		.catch(error => {
+			logger.warn(`${label} failed: ${formatDiscordSendError(error)}`);
+		});
+
+	const timeout = new Promise<"timeout">(resolve => {
+		setTimeout(() => resolve("timeout"), timeoutMs);
+	});
+
+	const result = await Promise.race([guardedOperation, timeout]);
+	if (result === "timeout") {
+		logger.warn(`${label} timed out after ${timeoutMs}ms`);
 	}
+}
+
+async function safeReact(message: Message, emoji: string): Promise<void> {
+	if (!config.discordReactionsEnabled) {
+		return;
+	}
+
+	await runDiscordOperation(
+		`Discord reaction (${emoji})`,
+		() => message.react(emoji)
+	);
 }
 
 async function safeReply(message: Message, content: any): Promise<void> {
-	try {
-		await message.reply(content);
-	} catch (error) {
-		logger.warn(`Discord reply failed: ${formatDiscordSendError(error)}`);
-	}
+	await runDiscordOperation(
+		"Discord reply",
+		() => message.reply(content)
+	);
 }
 
 async function safeChannelSend(message: Message, content: string): Promise<void> {
-	try {
-		await message.channel.send(content);
-	} catch (error) {
-		logger.warn(`Discord channel send failed: ${formatDiscordSendError(error)}`);
-	}
+	await runDiscordOperation(
+		"Discord channel send",
+		() => message.channel.send(content)
+	);
 }
 
-/**
- * Shared utility functions for Discord bot operations
- */
 export const DiscordUtils = {
 	async react(message: Message, emoji: string): Promise<void> {
-		await safeReact(message, emoji);
+		void safeReact(message, emoji);
 	},
 
 	async reply(message: Message, content: any): Promise<void> {
 		await safeReply(message, content);
 	},
 
-	/**
-	 * Create idle status for Discord bot
-	 */
 	status_idle(): ActivityOptions {
 		return {
 			name: config.prefix + "help",
@@ -57,9 +70,6 @@ export const DiscordUtils = {
 		};
 	},
 
-	/**
-	 * Create watching status for Discord bot
-	 */
 	status_watch(name: string): ActivityOptions {
 		return {
 			name: `${name}`,
@@ -67,69 +77,43 @@ export const DiscordUtils = {
 		};
 	},
 
-	/**
-	 * Send error message with reaction
-	 */
 	async sendError(message: Message, error: string): Promise<void> {
-		await safeReact(message, "❌");
-		await safeReply(message, `❌ **Error**: ${error}`);
+		void safeReact(message, "x");
+		await safeReply(message, `Error: ${error}`);
 	},
 
-	/**
-	 * Send success message with reaction
-	 */
 	async sendSuccess(message: Message, description: string): Promise<void> {
-		await safeReact(message, "✅");
-		await safeChannelSend(message, `✅ **Success**: ${description}`);
+		void safeReact(message, "white_check_mark");
+		await safeChannelSend(message, `Success: ${description}`);
 	},
 
-	/**
-	 * Send info message with reaction
-	 */
 	async sendInfo(message: Message, title: string, description: string): Promise<void> {
-		await safeReact(message, "ℹ️");
-		await safeChannelSend(message, `ℹ️ **${title}**: ${description}`);
+		void safeReact(message, "information_source");
+		await safeChannelSend(message, `${title}: ${description}`);
 	},
 
-	/**
-	 * Send playing message with reaction
-	 */
 	async sendPlaying(message: Message, title: string): Promise<void> {
-		const content = `📽 **Now Playing**: \`${title}\``;
-		await safeReact(message, "▶️");
-		await safeReply(message, content);
+		void safeReact(message, "arrow_forward");
+		await safeReply(message, `Now Playing: \`${title}\``);
 	},
 
-	/**
-	 * Send finish message
-	 */
 	async sendFinishMessage(message: Message): Promise<void> {
-		const content = "⏹️ **Finished**: Finished playing video.";
-		await safeChannelSend(message, content);
+		await safeChannelSend(message, "Finished: Finished playing video.");
 	},
 
-	/**
-	 * Send list message with reaction
-	 */
 	async sendList(message: Message, items: string[], type?: string): Promise<void> {
-		await safeReact(message, "📋");
+		void safeReact(message, "clipboard");
 		if (type == "ytsearch") {
-			await safeReply(message, `📋 **Search Results**:\n${items.join("\n")}`);
+			await safeReply(message, `Search Results:\n${items.join("\n")}`);
 		} else if (type == "refresh") {
-			await safeReply(message, `📋 **Video list refreshed**:\n${items.join("\n")}`);
+			await safeReply(message, `Video list refreshed:\n${items.join("\n")}`);
 		} else {
-			await safeChannelSend(message, `📋 **Local Videos List**:\n${items.join("\n")}`);
+			await safeChannelSend(message, `Local Videos List:\n${items.join("\n")}`);
 		}
 	}
 };
 
-/**
- * Error handling utilities
- */
 export const ErrorUtils = {
-	/**
-	 * Handle and log errors consistently
-	 */
 	async handleError(error: any, context: string, message?: Message): Promise<void> {
 		logger.error(`Error in ${context}:`, error);
 
@@ -138,9 +122,6 @@ export const ErrorUtils = {
 		}
 	},
 
-	/**
-	 * Handle async operation errors
-	 */
 	async withErrorHandling<T>(
 		operation: () => Promise<T>,
 		context: string,
@@ -155,13 +136,7 @@ export const ErrorUtils = {
 	}
 };
 
-/**
- * General utility functions
- */
 export const GeneralUtils = {
-	/**
-	 * Check if input is a valid streaming URL
-	 */
 	isValidUrl(input: string): boolean {
 		if (!input || typeof input !== "string") {
 			return false;
@@ -174,9 +149,6 @@ export const GeneralUtils = {
 			   input.startsWith("https://");
 	},
 
-	/**
-	 * Check if a path is a local file
-	 */
 	isLocalFile(filePath: string): boolean {
 		try {
 			return fs.existsSync(filePath) && fs.lstatSync(filePath).isFile();

@@ -598,12 +598,10 @@ export class StreamingService {
 		const preset = config.h26xPreset || "ultrafast";
 		const threads = this.getPositiveNumber(config.ffmpegThreads);
 
-		const statusMessage = await message.reply(
-			`Preparing optimized playback cache for \`${title || 'movie'}\`...`
-		).catch(error => {
-			logger.warn("Failed to send pre-transcode message:", error);
-			return null;
-		});
+		void DiscordUtils.reply(
+			message,
+			`Preparing optimized playback cache for \`${title || "movie"}\`...`
+		);
 
 		const args = [
 			"-y",
@@ -644,20 +642,12 @@ export class StreamingService {
 		try {
 			await this.waitForTranscodeProcess(child, outputFile);
 			await this.waitForFileSize(outputFile, 1, 5000);
-			if (statusMessage) {
-				await statusMessage.delete().catch(error =>
-					logger.warn("Failed to delete pre-transcode message:", error)
-				);
-			}
 			return outputFile;
 		} catch (error) {
-			if (statusMessage) {
-				await statusMessage.edit(
-					`Failed to prepare optimized playback cache for \`${title || 'movie'}\`.`
-				).catch(editError =>
-					logger.warn("Failed to edit pre-transcode message:", editError)
-				);
-			}
+			void DiscordUtils.reply(
+				message,
+				`Failed to prepare optimized playback cache for \`${title || "movie"}\`.`
+			);
 			throw error;
 		}
 	}
@@ -772,10 +762,7 @@ export class StreamingService {
 	}
 
 	private async handleDownload(message: Message, videoSource: string, title?: string): Promise<string | null> {
-		const downloadMessage = await message.reply(`📥 Downloading \`${title || 'YouTube video'}\`...`).catch(e => {
-			logger.warn("Failed to send 'Downloading...' message:", e);
-			return null;
-		});
+		void DiscordUtils.reply(message, `Downloading \`${title || "YouTube video"}\`...`);
 
 		try {
 			logger.info(`Downloading ${title || videoSource}...`);
@@ -783,20 +770,12 @@ export class StreamingService {
 
 			if (tempFilePath) {
 				logger.info(`Finished downloading ${title || videoSource}`);
-				if (downloadMessage) {
-					await downloadMessage.delete().catch(e => logger.warn("Failed to delete 'Downloading...' message:", e));
-				}
 				return tempFilePath;
 			}
 			throw new Error('Download failed, no temp file path returned.');
 		} catch (error) {
 			logger.error(`Failed to download YouTube video: ${videoSource}`, error);
-			const errorMessage = `❌ Failed to download \`${title || 'YouTube video'}\`.`;
-			if (downloadMessage) {
-				await downloadMessage.edit(errorMessage).catch(e => logger.warn("Failed to edit 'Downloading...' message:", e));
-			} else {
-				await DiscordUtils.sendError(message, `Failed to download video: ${error instanceof Error ? error.message : String(error)}`);
-			}
+			void DiscordUtils.sendError(message, `Failed to download video: ${error instanceof Error ? error.message : String(error)}`);
 			return null;
 		}
 	}
@@ -871,30 +850,19 @@ export class StreamingService {
 			const { tempFile: tempFilePath, completion } = await this.startHttpPrebuffer(videoSource, title);
 
 			if (config.fullCacheRemote || config.preTranscodeBeforePlayback) {
-				const cacheMessage = await message.reply(
-					`Downloading \`${title || 'remote movie'}\` to cache before playback starts...`
-				).catch(error => {
-					logger.warn("Failed to send remote cache message:", error);
-					return null;
-				});
+				void DiscordUtils.reply(
+					message,
+					`Downloading \`${title || "remote movie"}\` to cache before playback starts...`
+				);
 
 				try {
 					await completion;
 					await this.waitForFileSize(tempFilePath, 1, 5000);
-
-					if (cacheMessage) {
-						await cacheMessage.delete().catch(error =>
-							logger.warn("Failed to delete remote cache message:", error)
-						);
-					}
 				} catch (error) {
-					if (cacheMessage) {
-						await cacheMessage.edit(
-							`Failed to cache \`${title || 'remote movie'}\` before playback.`
-						).catch(editError =>
-							logger.warn("Failed to edit remote cache message:", editError)
-						);
-					}
+					void DiscordUtils.reply(
+						message,
+						`Failed to cache \`${title || "remote movie"}\` before playback.`
+					);
 					throw error;
 				}
 			} else {
