@@ -92,3 +92,5 @@ Confirmation checklist for an existing Hugging Face Space:
 - After the Space rebuilds, run the Discord `config` command and confirm `streamProfile=hf-cpu-basic`, `width=854`, `height=480`, `fps=24`, `bitrateKbps=1400`, `maxBitrateKbps=2000`, `fullCacheRemote=true`, `preTranscodeBeforePlayback=true`, `noTranscoding=false`, and `ffmpegThreads=2`.
 
 Docker Compose note: when running outside Hugging Face, Spaces Variables/Secrets are not automatically available. If the compose file references `.env`, create `/path/to/project/.env` on that machine with the same values before running `docker compose up`.
+
+Space metadata note: Hugging Face Spaces requires YAML front matter at the very top of `README.md`. The repo README now declares `sdk: docker`, `app_port: 3000`, and `suggested_hardware: cpu-basic`. Keep `app_port` aligned with `SERVER_PORT`.

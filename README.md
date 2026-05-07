@@ -1,3 +1,16 @@
+---
+title: StreamBot
+emoji: 🎬
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 3000
+suggested_hardware: cpu-basic
+license: mit
+short_description: Discord video streaming bot
+pinned: false
+---
+
 <div align="center">
 
 <img src="src/server/public/favicon.svg" alt="StreamBot Logo" width="400" height="120"/>
