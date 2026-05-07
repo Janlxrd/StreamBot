@@ -1,6 +1,7 @@
 import { BaseCommand } from "./base.js";
 import { CommandContext } from "../types/index.js";
 import { CommandManager } from "./manager.js";
+import { DiscordUtils } from "../utils/shared.js";
 
 export default class HelpCommand extends BaseCommand {
 	name = "help";
@@ -15,12 +16,12 @@ export default class HelpCommand extends BaseCommand {
 		const commandList = this.commandManager.getCommandList();
 
 		const helpText = [
-			'📽 **Available Commands**',
-			'',
+			"Available Commands",
+			"",
 			commandList,
-		].join('\n');
+		].join("\n");
 
-		await context.message.react('📋');
-		await context.message.reply(helpText);
+		await DiscordUtils.react(context.message, "📋");
+		await DiscordUtils.reply(context.message, helpText);
 	}
 }

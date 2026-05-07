@@ -94,3 +94,10 @@ Confirmation checklist for an existing Hugging Face Space:
 Docker Compose note: when running outside Hugging Face, Spaces Variables/Secrets are not automatically available. If the compose file references `.env`, create `/path/to/project/.env` on that machine with the same values before running `docker compose up`.
 
 Space metadata note: Hugging Face Spaces requires YAML front matter at the very top of `README.md`. The repo README now declares `sdk: docker`, `app_port: 3000`, and `suggested_hardware: cpu-basic`. Keep `app_port` aligned with `SERVER_PORT`.
+
+## 2026-05-07 Discord Abort Handling
+
+- Observed Hugging Face logs with `The operation was aborted` while acknowledging commands such as `help` and queue additions.
+- The queue URL path adds the item before sending the Discord success message, so the abort is usually a failed Discord reaction/reply rather than a media resolution failure.
+- Updated shared Discord send helpers so reactions, replies, and channel sends are best-effort. A transient Discord API abort now logs a warning instead of making the command fail.
+- Updated `help`, `ping`, `preview`, `queue`, and unknown-command handling to use the safer helpers where practical.
