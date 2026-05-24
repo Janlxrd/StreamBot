@@ -233,7 +233,8 @@ ADMIN_IDS=["YOUR_USER_ID_HERE"]
 
 # Discord acknowledgement behavior
 DISCORD_REACTIONS_ENABLED=""          # Leave empty for profile default; set false if reactions time out
-DISCORD_SEND_TIMEOUT_MS=""            # Leave empty for profile default; hf-cpu-basic uses 1500ms
+DISCORD_SEND_TIMEOUT_MS=""            # Leave empty for 10000ms; set 0 to wait forever, or higher if Discord is slow
+DISCORD_SUPPRESS_ABORT_WARNINGS=""    # Leave empty to log Discord send aborts while debugging
 ```
 
 ### 📁 File Management
@@ -300,7 +301,7 @@ For Hugging Face CPU Basic Spaces, leave `STREAM_PROFILE` unset for auto-detecti
 STREAM_PROFILE="hf-cpu-basic"
 ```
 
-That profile defaults to 854x480, 24 FPS, 1400-2000 Kbps, two FFmpeg threads, full remote cache, and pre-transcoding before playback.
+That profile defaults to 854x480, 24 FPS, 1400-2000 Kbps, two FFmpeg threads, full remote cache, and pre-transcoding before playback. The bot joins voice and sends status before long preparation work so the command does not look dead while the movie is cached.
 
 ### 🌐 Web Interface Configuration
 

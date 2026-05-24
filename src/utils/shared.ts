@@ -11,13 +11,41 @@ function formatDiscordSendError(error: any): string {
 	return String(error);
 }
 
-async function runDiscordOperation(label: string, operation: () => Promise<unknown>): Promise<void> {
-	const timeoutMs = Number(config.discordSendTimeoutMs) > 0 ? Number(config.discordSendTimeoutMs) : 1500;
+function isAbortLikeDiscordError(error: any): boolean {
+	const message = formatDiscordSendError(error).toLowerCase();
+	return message.includes("operation was aborted") || message.includes("aborted");
+}
+
+function getRawTextContent(content: any): string | null {
+	if (typeof content === "string") {
+		return content;
+	}
+
+	if (content && typeof content.content === "string") {
+		return content.content;
+	}
+
+	return null;
+}
+
+async function runDiscordOperation(label: string, operation: () => Promise<unknown>): Promise<boolean> {
+	const timeoutMs = Number(config.discordSendTimeoutMs);
+	let timedOut = false;
 
 	const guardedOperation = operation()
+		.then(() => true)
 		.catch(error => {
+			if (timedOut || (config.discordSuppressAbortWarnings && isAbortLikeDiscordError(error))) {
+				return false;
+			}
+
 			logger.warn(`${label} failed: ${formatDiscordSendError(error)}`);
+			return false;
 		});
+
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+		return guardedOperation;
+	}
 
 	const timeout = new Promise<"timeout">(resolve => {
 		setTimeout(() => resolve("timeout"), timeoutMs);
@@ -25,8 +53,41 @@ async function runDiscordOperation(label: string, operation: () => Promise<unkno
 
 	const result = await Promise.race([guardedOperation, timeout]);
 	if (result === "timeout") {
-		logger.warn(`${label} timed out after ${timeoutMs}ms`);
+		timedOut = true;
+		if (!config.discordSuppressAbortWarnings) {
+			logger.warn(`${label} timed out after ${timeoutMs}ms`);
+		}
+		return false;
 	}
+
+	return result;
+}
+
+async function rawChannelSendFallback(message: Message, content: any): Promise<boolean> {
+	const text = getRawTextContent(content);
+	const channelId = (message.channel as any)?.id;
+
+	if (!text || !channelId || !config.token) {
+		return false;
+	}
+
+	return runDiscordOperation(
+		"Discord raw channel send fallback",
+		async () => {
+			const response = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+				method: "POST",
+				headers: {
+					authorization: config.token,
+					"content-type": "application/json"
+				},
+				body: JSON.stringify({ content: text.slice(0, 2000) })
+			});
+
+			if (!response.ok) {
+				throw new Error(`Discord REST ${response.status}: ${await response.text()}`);
+			}
+		}
+	);
 }
 
 async function safeReact(message: Message, emoji: string): Promise<void> {
@@ -41,17 +102,34 @@ async function safeReact(message: Message, emoji: string): Promise<void> {
 }
 
 async function safeReply(message: Message, content: any): Promise<void> {
-	await runDiscordOperation(
-		"Discord reply",
-		() => message.reply(content)
-	);
-}
-
-async function safeChannelSend(message: Message, content: string): Promise<void> {
-	await runDiscordOperation(
+	const sent = await runDiscordOperation(
 		"Discord channel send",
 		() => message.channel.send(content)
 	);
+
+	if (sent) {
+		return;
+	}
+
+	const replied = await runDiscordOperation(
+		"Discord reply fallback",
+		() => message.reply(content)
+	);
+
+	if (!replied) {
+		await rawChannelSendFallback(message, content);
+	}
+}
+
+async function safeChannelSend(message: Message, content: any): Promise<void> {
+	const sent = await runDiscordOperation(
+		"Discord channel send",
+		() => message.channel.send(content)
+	);
+
+	if (!sent) {
+		await rawChannelSendFallback(message, content);
+	}
 }
 
 export const DiscordUtils = {

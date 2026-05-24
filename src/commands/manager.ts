@@ -1,6 +1,7 @@
 import { Command, CommandContext } from "../types/index.js";
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from "url";
 import logger from '../utils/logger.js';
 import config from '../config.js';
 import { ErrorUtils } from '../utils/shared.js';
@@ -8,9 +9,10 @@ import { ErrorUtils } from '../utils/shared.js';
 export class CommandManager {
 	private commands: Map<string, Command> = new Map();
 	private aliases: Map<string, string> = new Map();
+	private loadPromise: Promise<void>;
 
 	constructor() {
-		this.loadCommands();
+		this.loadPromise = this.loadCommands();
 	}
 
 	private async loadCommands(): Promise<void> {
@@ -33,7 +35,7 @@ export class CommandManager {
 					const isDist = commandsPath.includes('dist');
 					const fileName = isDist ? file.replace('.ts', '.js') : file;
 					const filePath = path.join(commandsPath, fileName);
-					const commandModule = await import(filePath);
+					const commandModule = await import(pathToFileURL(filePath).href);
 
 					// Look for default export or named export
 					let CommandClass = commandModule.default || commandModule[Object.keys(commandModule)[0]];
@@ -68,6 +70,10 @@ export class CommandManager {
 		}
 	}
 
+	public async ready(): Promise<void> {
+		await this.loadPromise;
+	}
+
 	private isCommand(obj: any): obj is new (commandManager?: CommandManager) => Command {
 		if (!obj) return false;
 
@@ -88,6 +94,8 @@ export class CommandManager {
 	}
 
 	public async executeCommand(commandName: string, context: CommandContext): Promise<boolean> {
+		await this.ready();
+
 		const command = this.getCommand(commandName);
 
 		if (!command) {

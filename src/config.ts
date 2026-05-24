@@ -88,14 +88,16 @@ const defaultStreamMaxBitrateKbps = isHfCpuBasicProfile ? 2000 : 2500;
 const defaultFfmpegThreads = isHfCpuBasicProfile ? 2 : 0;
 const defaultFullCacheRemote = isHfCpuBasicProfile;
 const defaultPreTranscodeBeforePlayback = isHfCpuBasicProfile;
+const defaultRemotePrebufferMb = isHfCpuBasicProfile ? 50 : 200;
 const defaultRemoteCacheDir = isHuggingFaceSpace ? "/tmp/streambot-remote-cache" : "./tmp/remote-cache";
 const defaultTranscodeCacheDir = isHuggingFaceSpace ? "/tmp/streambot-transcode-cache" : "./tmp/transcode-cache";
-const defaultDiscordSendTimeoutMs = isHfCpuBasicProfile ? 1500 : 5000;
+const defaultDiscordSendTimeoutMs = 10000;
+const defaultDiscordSuppressAbortWarnings = false;
 
 export default {
 	// Selfbot options
 	token: process.env.TOKEN || '',
-	prefix: process.env.PREFIX || '',
+	prefix: process.env.PREFIX || '$',
 	guildId: process.env.GUILD_ID ? process.env.GUILD_ID : '',
 	cmdChannelId: process.env.COMMAND_CHANNEL_ID ? process.env.COMMAND_CHANNEL_ID : '',
 	videoChannelId: process.env.VIDEO_CHANNEL_ID ? process.env.VIDEO_CHANNEL_ID : '',
@@ -103,6 +105,7 @@ export default {
 	streamProfile,
 	discordReactionsEnabled: process.env.DISCORD_REACTIONS_ENABLED ? parseBoolean(process.env.DISCORD_REACTIONS_ENABLED) : !isHfCpuBasicProfile,
 	discordSendTimeoutMs: parseNumber(process.env.DISCORD_SEND_TIMEOUT_MS, defaultDiscordSendTimeoutMs),
+	discordSuppressAbortWarnings: process.env.DISCORD_SUPPRESS_ABORT_WARNINGS ? parseBoolean(process.env.DISCORD_SUPPRESS_ABORT_WARNINGS) : defaultDiscordSuppressAbortWarnings,
 
 	// General options
 	videosDir: process.env.VIDEOS_DIR ? process.env.VIDEOS_DIR : './videos',
@@ -131,7 +134,7 @@ export default {
 	noTranscoding: process.env.STREAM_NO_TRANSCODING ? parseBoolean(process.env.STREAM_NO_TRANSCODING) : false,
 	preTranscodeBeforePlayback: process.env.STREAM_PRETRANSCODE_BEFORE_PLAYBACK ? parseBoolean(process.env.STREAM_PRETRANSCODE_BEFORE_PLAYBACK) : defaultPreTranscodeBeforePlayback,
 	fullCacheRemote: process.env.STREAM_FULL_CACHE_REMOTE ? parseBoolean(process.env.STREAM_FULL_CACHE_REMOTE) : defaultFullCacheRemote,
-	remotePrebufferMb: parseNumber(process.env.STREAM_REMOTE_PREBUFFER_MB, 200),
+	remotePrebufferMb: parseNumber(process.env.STREAM_REMOTE_PREBUFFER_MB, defaultRemotePrebufferMb),
 
 	// Videos server options
 	server_enabled: process.env.SERVER_ENABLED ? parseBoolean(process.env.SERVER_ENABLED) : false,

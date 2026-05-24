@@ -1,5 +1,5 @@
 import { Client, Message } from "discord.js-selfbot-v13";
-import { Streamer, Utils, prepareStream, playStream } from "@dank074/discord-video-stream";
+import { Streamer, Utils, prepareStream, playStream, Encoders } from "@dank074/discord-video-stream";
 import fs from 'fs';
 import path from 'path';
 import { execFile, spawn, ChildProcessWithoutNullStreams } from "child_process";
@@ -173,7 +173,7 @@ export class StreamingService {
 					true,
 					videoSource
 				);
-				await DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
+				void DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
 				return true;
 			}
 
@@ -188,7 +188,7 @@ export class StreamingService {
 					true,
 					videoSource
 				);
-				await DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
+				void DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
 				return true;
 			}
 				
@@ -201,7 +201,7 @@ export class StreamingService {
 					false,
 					videoSource
 				);
-				await DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
+				void DiscordUtils.sendSuccess(message, `Added to queue: \`${queueItem.title}\``);
 				return true;
 			}
 		} catch (error) {
@@ -526,12 +526,12 @@ export class StreamingService {
 		return {};
 	}
 
-	private getCustomFfmpegFlags(): string[] | undefined {
+	private getCustomFfmpegFlags(skipVideoEncoder: boolean = false): string[] | undefined {
 		const flags: string[] = [];
 		const encoder = String(config.ffmpegVideoEncoder || "").trim();
 		const threads = this.getPositiveNumber(config.ffmpegThreads);
 
-		if (encoder) {
+		if (encoder && !skipVideoEncoder) {
 			flags.push("-c:v", encoder);
 		}
 
@@ -540,6 +540,21 @@ export class StreamingService {
 		}
 
 		return flags.length ? flags : undefined;
+	}
+
+	private getStreamEncoder(): any {
+		const preset = config.h26xPreset || "ultrafast";
+
+		return Encoders.software({
+			x264: {
+				preset,
+				tune: "zerolatency"
+			},
+			x265: {
+				preset,
+				tune: "zerolatency"
+			}
+		});
 	}
 
 	private getTranscodeVideoFilter(): string {
@@ -595,6 +610,7 @@ export class StreamingService {
 		const bitrate = this.getPositiveNumber(config.bitrateKbps) || 2000;
 		const maxBitrate = this.getPositiveNumber(config.maxBitrateKbps) || bitrate;
 		const fps = this.getPositiveNumber(config.fps) || 24;
+		const keyframeInterval = Math.max(1, Math.round(fps));
 		const preset = config.h26xPreset || "ultrafast";
 		const threads = this.getPositiveNumber(config.ffmpegThreads);
 
@@ -612,9 +628,15 @@ export class StreamingService {
 			"-r", String(fps),
 			"-c:v", "libx264",
 			"-preset", preset,
+			"-tune", "zerolatency",
 			"-b:v", `${bitrate}k`,
 			"-maxrate", `${maxBitrate}k`,
 			"-bufsize", `${maxBitrate * 2}k`,
+			"-bf", "0",
+			"-g", String(keyframeInterval),
+			"-keyint_min", String(keyframeInterval),
+			"-sc_threshold", "0",
+			"-force_key_frames", "expr:gte(t,n_forced*1)",
 			"-pix_fmt", "yuv420p",
 			"-c:a", "aac",
 			"-b:a", "128k",
@@ -660,13 +682,14 @@ export class StreamingService {
 		let frameRate = sourceFps ? Math.min(sourceFps, configuredFps) : configuredFps;
 		let bitrateVideo = configuredBitrate;
 		const dimensions = this.getOutputDimensions(videoParams);
+		const noTranscoding = forceNoTranscoding || config.noTranscoding;
 	
 		if (videoParams && videoParams.bitrate && !config.bitrateOverride) {
 			bitrateVideo = Math.min(videoParams.bitrate, maxBitrate);
 		}
 	
 		return {
-			noTranscoding: forceNoTranscoding || config.noTranscoding,
+			noTranscoding,
 			width: dimensions.width,
 			height: dimensions.height,
 			frameRate,
@@ -674,10 +697,10 @@ export class StreamingService {
 			bitrateVideo,
 			bitrateVideoMax: maxBitrate,
 			videoCodec: Utils.normalizeVideoCodec(config.videoCodec),
+			encoder: this.getStreamEncoder(),
 			hardwareAcceleratedDecoding: config.hardwareAcceleratedDecoding,
 			minimizeLatency: false,
-			h26xPreset: config.h26xPreset,
-			customFfmpegFlags: this.getCustomFfmpegFlags()
+			customFfmpegFlags: this.getCustomFfmpegFlags(noTranscoding)
 		};
 	}
 	
@@ -948,13 +971,13 @@ export class StreamingService {
 
 		let tempFiles: string[] = [];
 		try {
+			await this.ensureVoiceConnection(guildId, channelId, title);
+			void DiscordUtils.sendInfo(message, "Preparing", `Preparing \`${title || videoSource}\`...`);
+
 			const { inputForFfmpeg, tempFilePaths, forceNoTranscoding } = await this.prepareVideoSource(message, videoSource, title);
 			tempFiles = tempFilePaths;
 
 			logger.info(`FFmpeg input source: ${inputForFfmpeg}`);
-
-			await this.ensureVoiceConnection(guildId, channelId, title);
-			await DiscordUtils.sendPlaying(message, title || videoSource);
 
 			let audioStreamIndex: number | null = null;
 
@@ -969,6 +992,7 @@ export class StreamingService {
 			logger.info(`Final selected audio stream index: ${audioStreamIndex}`);
 
 			const streamOpts = this.setupStreamConfiguration(videoParams, forceNoTranscoding);
+			void DiscordUtils.sendPlaying(message, title || videoSource);
 			await this.executeStreamWorkflow(
 				inputForFfmpeg,
 				streamOpts,
