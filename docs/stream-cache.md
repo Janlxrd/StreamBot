@@ -178,3 +178,10 @@ Space metadata note: Hugging Face Spaces requires YAML front matter at the very 
 - Added a config clamp so nonzero Discord send timeouts below 10000ms are treated as 10000ms. `DISCORD_SEND_TIMEOUT_MS=0` still means wait forever.
 - This should stop commands from immediately cycling through channel-send, reply, and raw REST fallbacks before Discord has enough time to answer on slow hosts.
 - The media side of the same log looked healthy: remote cache completed, pre-transcode started, and progress reached 1.6% at about 3.84x encode speed. With `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=true`, Discord playback still waits for that optimized cache to finish.
+
+## 2026-05-24 Prepared Cache H264 Copy Fix
+
+- Observed playback failing after a prepared MP4 was streamed with `-vcodec copy`: `h264_metadata Invalid NAL unit size` from `node-av`/`@dank074/discord-video-stream`.
+- The prepared cache itself had already finished; the failure happened when `prepareStream` copied the H.264 video into the NUT pipe and the Discord library's H.264 bitstream filters rejected the packet format.
+- Added `-bsf:v h264_mp4toannexb` when video is copied in no-transcoding mode for H.264, and `-bsf:v hevc_mp4toannexb` for H.265. This keeps the no-transcode prepared-cache path while making the copied bitstream explicit for the demuxer.
+- Existing running containers/spaces must be rebuilt/restarted before this fix appears in the logged FFmpeg command. The command should include `-bsf:v h264_mp4toannexb` on H.264 prepared-cache playback.

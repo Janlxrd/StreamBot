@@ -956,6 +956,16 @@ export class StreamingService {
 			flags.push("-c:v", encoder);
 		}
 
+		if (skipVideoEncoder) {
+			const codec = String(config.videoCodec || "").toUpperCase();
+
+			if (codec === "H264") {
+				flags.push("-bsf:v", "h264_mp4toannexb");
+			} else if (codec === "H265") {
+				flags.push("-bsf:v", "hevc_mp4toannexb");
+			}
+		}
+
 		if (threads) {
 			flags.push("-threads", String(threads));
 		}
