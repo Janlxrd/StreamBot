@@ -144,3 +144,12 @@ Space metadata note: Hugging Face Spaces requires YAML front matter at the very 
 - Set the software encoder tune to `zerolatency` for x264/x265 so weak CPU hosts start emitting frames more reliably.
 - Fixed the pre-transcode cache used by `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=true` to be Discord streaming friendly before it is streamed with `noTranscoding`: B-frames are disabled, scene-cut keyframes are disabled, and keyframes are forced every second.
 - Prevented `STREAM_FFMPEG_VIDEO_ENCODER` from overriding video copy mode when the prepared cache is streamed with `noTranscoding`.
+
+## 2026-05-24 Pre-transcode Visibility
+
+- Observed runtime logs where the remote cache finished, then playback appeared stuck at `Preparing optimized playback cache...`.
+- This is expected when `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=true`: the bot waits for FFmpeg to create the full optimized MP4 before calling `prepareStream`/`playStream`.
+- On `hf-cpu-basic`, a 1080p movie can sit in this step for many minutes because the 2 vCPU host is doing H.264 encoding up front.
+- Added info-level pre-transcode progress logging using FFmpeg `-progress pipe:2`, including percent when duration probing succeeds, encoded time, speed, encode FPS, and output size.
+- Updated the Discord preparation message to say playback starts after the CPU transcode finishes, and added occasional long-running progress replies.
+- If faster startup matters more than smooth CPU-only playback, set `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=false`. Expect live transcoding to be more likely to stutter on CPU Basic.

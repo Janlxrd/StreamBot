@@ -11,6 +11,14 @@ import logger from '../utils/logger.js';
 import { DiscordUtils, ErrorUtils } from '../utils/shared.js';
 import { QueueItem, StreamStatus } from '../types/index.js';
 
+type TranscodeProgress = {
+	encodedSeconds?: number;
+	frame?: string;
+	fps?: string;
+	speed?: string;
+	totalSizeBytes?: number;
+};
+
 export class StreamingService {
 	private streamer: Streamer;
 	private mediaService: MediaService;
@@ -248,6 +256,148 @@ export class StreamingService {
 	
 			await this.wait(1000);
 		}
+	}
+
+	private async getMediaDurationSeconds(inputFile: string): Promise<number | undefined> {
+		return new Promise(resolve => {
+			execFile(
+				"ffprobe",
+				[
+					"-v", "error",
+					"-show_entries", "format=duration",
+					"-of", "default=noprint_wrappers=1:nokey=1",
+					inputFile
+				],
+				{ timeout: 30000 },
+				(error, stdout) => {
+					if (error) {
+						logger.warn(`Unable to probe media duration for ${inputFile}: ${error.message}`);
+						resolve(undefined);
+						return;
+					}
+
+					const duration = Number.parseFloat(String(stdout).trim());
+					resolve(Number.isFinite(duration) && duration > 0 ? duration : undefined);
+				}
+			);
+		});
+	}
+
+	private parseFfmpegTimestampToSeconds(value: string): number | undefined {
+		const match = value.trim().match(/^(\d+):(\d+):(\d+(?:\.\d+)?)$/);
+		if (!match) {
+			return undefined;
+		}
+
+		const hours = Number.parseInt(match[1], 10);
+		const minutes = Number.parseInt(match[2], 10);
+		const seconds = Number.parseFloat(match[3]);
+		if (![hours, minutes, seconds].every(Number.isFinite)) {
+			return undefined;
+		}
+
+		return hours * 3600 + minutes * 60 + seconds;
+	}
+
+	private formatDuration(seconds?: number): string {
+		if (!Number.isFinite(seconds) || seconds === undefined || seconds < 0) {
+			return "unknown";
+		}
+
+		const totalSeconds = Math.floor(seconds);
+		const hours = Math.floor(totalSeconds / 3600);
+		const minutes = Math.floor((totalSeconds % 3600) / 60);
+		const remainingSeconds = totalSeconds % 60;
+
+		if (hours > 0) {
+			return `${hours}h ${minutes}m ${remainingSeconds}s`;
+		}
+
+		if (minutes > 0) {
+			return `${minutes}m ${remainingSeconds}s`;
+		}
+
+		return `${remainingSeconds}s`;
+	}
+
+	private formatBytes(bytes?: number): string {
+		if (!Number.isFinite(bytes) || bytes === undefined || bytes < 0) {
+			return "unknown";
+		}
+
+		const units = ["B", "KB", "MB", "GB"];
+		let value = bytes;
+		let unitIndex = 0;
+
+		while (value >= 1024 && unitIndex < units.length - 1) {
+			value /= 1024;
+			unitIndex += 1;
+		}
+
+		return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+	}
+
+	private updateTranscodeProgressFromLine(line: string, progress: TranscodeProgress): "continue" | "end" | undefined {
+		const separatorIndex = line.indexOf("=");
+		if (separatorIndex === -1) {
+			return undefined;
+		}
+
+		const key = line.slice(0, separatorIndex).trim();
+		const value = line.slice(separatorIndex + 1).trim();
+
+		switch (key) {
+			case "frame":
+				progress.frame = value;
+				break;
+			case "fps":
+				progress.fps = value;
+				break;
+			case "speed":
+				progress.speed = value;
+				break;
+			case "total_size": {
+				const bytes = Number.parseInt(value, 10);
+				if (Number.isFinite(bytes)) {
+					progress.totalSizeBytes = bytes;
+				}
+				break;
+			}
+			case "out_time": {
+				const seconds = this.parseFfmpegTimestampToSeconds(value);
+				if (seconds !== undefined) {
+					progress.encodedSeconds = seconds;
+				}
+				break;
+			}
+			case "out_time_us":
+			case "out_time_ms": {
+				const rawTime = Number.parseInt(value, 10);
+				if (Number.isFinite(rawTime) && rawTime >= 0) {
+					progress.encodedSeconds = rawTime / 1_000_000;
+				}
+				break;
+			}
+			case "progress":
+				return value === "end" ? "end" : "continue";
+		}
+
+		return undefined;
+	}
+
+	private buildTranscodeProgressMessage(title: string | undefined, progress: TranscodeProgress, totalDurationSeconds?: number): string {
+		const encodedSeconds = progress.encodedSeconds;
+		const percent = totalDurationSeconds && encodedSeconds !== undefined
+			? ` ${Math.min(100, Math.max(0, (encodedSeconds / totalDurationSeconds) * 100)).toFixed(1)}%`
+			: "";
+		const duration = totalDurationSeconds
+			? `${this.formatDuration(encodedSeconds)} / ${this.formatDuration(totalDurationSeconds)}`
+			: this.formatDuration(encodedSeconds);
+		const speed = progress.speed ? `, speed ${progress.speed}` : "";
+		const fps = progress.fps ? `, encode fps ${progress.fps}` : "";
+		const outputSize = progress.totalSizeBytes ? `, output ${this.formatBytes(progress.totalSizeBytes)}` : "";
+
+		return `Pre-transcode progress${percent} for ${title || "movie"}: ${duration}${speed}${fps}${outputSize}`;
 	}
 	
 	private waitForBufferProcess(child: ChildProcessWithoutNullStreams, tempFile: string): Promise<void> {
@@ -613,14 +763,24 @@ export class StreamingService {
 		const keyframeInterval = Math.max(1, Math.round(fps));
 		const preset = config.h26xPreset || "ultrafast";
 		const threads = this.getPositiveNumber(config.ffmpegThreads);
+		const totalDurationSeconds = await this.getMediaDurationSeconds(inputFile);
 
 		void DiscordUtils.reply(
 			message,
-			`Preparing optimized playback cache for \`${title || "movie"}\`...`
+			`Preparing optimized playback cache for \`${title || "movie"}\`... Playback will start after this CPU transcode finishes.`
+		);
+		logger.info(
+			`Starting pre-transcode for ${title || inputFile}: duration=${this.formatDuration(totalDurationSeconds)}, ` +
+			`target=${this.getPositiveNumber(config.maxWidth) || this.getPositiveNumber(config.width) || 1280}x` +
+			`${this.getPositiveNumber(config.maxHeight) || this.getPositiveNumber(config.height) || 720}, ` +
+			`fps=${fps}, bitrate=${bitrate}k, maxrate=${maxBitrate}k, preset=${preset}, threads=${threads || "auto"}`
 		);
 
 		const args = [
 			"-y",
+			"-hide_banner",
+			"-nostats",
+			"-progress", "pipe:2",
 			"-i", inputFile,
 			"-map", "0:v:0",
 			"-map", "0:a?",
@@ -654,8 +814,40 @@ export class StreamingService {
 			stdio: ["ignore", "ignore", "pipe"]
 		});
 
+		const progress: TranscodeProgress = {};
+		let progressBuffer = "";
+		let lastProgressLogAt = 0;
+		let lastProgressReplyAt = Date.now();
+		const maybeReportProgress = (force: boolean = false) => {
+			const now = Date.now();
+			if (!force && now - lastProgressLogAt < 30000) {
+				return;
+			}
+
+			lastProgressLogAt = now;
+			const progressMessage = this.buildTranscodeProgressMessage(title, progress, totalDurationSeconds);
+			logger.info(progressMessage);
+
+			if (now - lastProgressReplyAt >= 5 * 60 * 1000) {
+				lastProgressReplyAt = now;
+				void DiscordUtils.reply(message, progressMessage);
+			}
+		};
+
 		child.stderr.on("data", (chunk) => {
-			logger.debug?.(`pre-transcode ffmpeg: ${chunk.toString()}`);
+			const text = chunk.toString();
+			logger.debug?.(`pre-transcode ffmpeg: ${text}`);
+			progressBuffer += text;
+
+			const lines = progressBuffer.split(/\r?\n/);
+			progressBuffer = lines.pop() || "";
+
+			for (const line of lines) {
+				const progressEvent = this.updateTranscodeProgressFromLine(line, progress);
+				if (progressEvent) {
+					maybeReportProgress(progressEvent === "end");
+				}
+			}
 		});
 
 		this.activeTranscodeProcess = child;
