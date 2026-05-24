@@ -92,7 +92,18 @@ const defaultRemotePrebufferMb = isHfCpuBasicProfile ? 50 : 200;
 const defaultRemoteCacheDir = isHuggingFaceSpace ? "/tmp/streambot-remote-cache" : "./tmp/remote-cache";
 const defaultTranscodeCacheDir = isHuggingFaceSpace ? "/tmp/streambot-transcode-cache" : "./tmp/transcode-cache";
 const defaultDiscordSendTimeoutMs = 10000;
+const minDiscordSendTimeoutMs = 10000;
 const defaultDiscordSuppressAbortWarnings = false;
+
+function parseDiscordSendTimeoutMs(value: string | undefined): number {
+	const parsed = parseNumber(value, defaultDiscordSendTimeoutMs);
+
+	if (parsed === 0) {
+		return 0;
+	}
+
+	return parsed < minDiscordSendTimeoutMs ? minDiscordSendTimeoutMs : parsed;
+}
 
 export default {
 	// Selfbot options
@@ -104,7 +115,7 @@ export default {
 	adminIds: process.env.ADMIN_IDS ? parseAdminIds(process.env.ADMIN_IDS) : [],
 	streamProfile,
 	discordReactionsEnabled: process.env.DISCORD_REACTIONS_ENABLED ? parseBoolean(process.env.DISCORD_REACTIONS_ENABLED) : !isHfCpuBasicProfile,
-	discordSendTimeoutMs: parseNumber(process.env.DISCORD_SEND_TIMEOUT_MS, defaultDiscordSendTimeoutMs),
+	discordSendTimeoutMs: parseDiscordSendTimeoutMs(process.env.DISCORD_SEND_TIMEOUT_MS),
 	discordSuppressAbortWarnings: process.env.DISCORD_SUPPRESS_ABORT_WARNINGS ? parseBoolean(process.env.DISCORD_SUPPRESS_ABORT_WARNINGS) : defaultDiscordSuppressAbortWarnings,
 
 	// General options

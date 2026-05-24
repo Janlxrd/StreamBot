@@ -316,6 +316,9 @@ export interface QueueItem {
   	addedAt: Date;
   	originalInput?: string;
   	resolved?: boolean;
+  	preparedInput?: string;
+  	preparedTempFiles?: string[];
+  	forceNoTranscoding?: boolean;
 }
 
 export interface VideoQueue {

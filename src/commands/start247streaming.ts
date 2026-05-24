@@ -60,7 +60,27 @@ export default class Start247StreamingCommand extends BaseCommand {
 
 	private async runLoop(context: CommandContext): Promise<void> {
 		while (Start247StreamingCommand.loopRunning) {
-			if (context.streamStatus.playing || !context.streamingService.getQueueService().isEmpty()) {
+			if (context.streamStatus.playing) {
+				if (context.streamingService.canWarm247NextMovie()) {
+					const candidate = await this.pickPlayableMovieCandidate();
+
+					if (!candidate) {
+						logger.warn("247 streaming found no playable Meteor/Stremio movie candidate to warm");
+					} else {
+						logger.info(`247 streaming warming next ${candidate.query} -> ${candidate.imdbId}`);
+						await context.streamingService.warm247NextMovie(
+							context.message,
+							candidate.finalUrl,
+							candidate.query
+						);
+					}
+				}
+
+				await this.sleep(config.auto247IntervalMs);
+				continue;
+			}
+
+			if (!context.streamingService.getQueueService().isEmpty()) {
 				await this.sleep(config.auto247IntervalMs);
 				continue;
 			}

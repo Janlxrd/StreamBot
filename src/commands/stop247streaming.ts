@@ -10,6 +10,7 @@ export default class Stop247StreamingCommand extends BaseCommand {
 
 	async execute(context: CommandContext): Promise<void> {
 		Start247StreamingCommand.stopLoop();
+		await context.streamingService.cancel247WarmCache();
 		await DiscordUtils.sendInfo(context.message, "247 Streaming", "Stopped.");
 	}
 }

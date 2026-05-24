@@ -233,7 +233,7 @@ ADMIN_IDS=["YOUR_USER_ID_HERE"]
 
 # Discord acknowledgement behavior
 DISCORD_REACTIONS_ENABLED=""          # Leave empty for profile default; set false if reactions time out
-DISCORD_SEND_TIMEOUT_MS=""            # Leave empty for 10000ms; set 0 to wait forever, or higher if Discord is slow
+DISCORD_SEND_TIMEOUT_MS=""            # Leave empty for 10000ms; nonzero values below 10000 are clamped; set 0 to wait forever
 DISCORD_SUPPRESS_ABORT_WARNINGS=""    # Leave empty to log Discord send aborts while debugging
 ```
 

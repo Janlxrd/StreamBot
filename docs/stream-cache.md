@@ -153,3 +153,28 @@ Space metadata note: Hugging Face Spaces requires YAML front matter at the very 
 - Added info-level pre-transcode progress logging using FFmpeg `-progress pipe:2`, including percent when duration probing succeeds, encoded time, speed, encode FPS, and output size.
 - Updated the Discord preparation message to say playback starts after the CPU transcode finishes, and added occasional long-running progress replies.
 - If faster startup matters more than smooth CPU-only playback, set `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=false`. Expect live transcoding to be more likely to stutter on CPU Basic.
+
+## 2026-05-24 247 Next-Movie Precache Direction
+
+- For 24/7 playback, pre-caching the next movie while the current prepared MP4 is playing would improve continuity because the resolve, remote cache, and pre-transcode delay can be hidden behind the current movie.
+- This is especially useful with `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=true`, where the current movie plays from an already optimized MP4 with video copy mode, leaving more CPU headroom than live transcoding.
+- Do not implement this by reusing `activeBufferProcess`, `activeTranscodeProcess`, or `activeTranscodeTempFile`. Those fields are tied to the currently preparing/playing item and cleanup/skip behavior can delete or kill the wrong file/process if a second item is warming in the background.
+- Preferred implementation: add a single-slot 247 warm cache with its own process tracking, temp-file ownership, abort path, disk-space guard, and queue metadata for `preparedInput`, `preparedTempFiles`, and `forceNoTranscoding`.
+- Keep the warm cache depth at one item on Hugging Face CPU Basic. More than one prepared movie risks filling `/tmp` and wasting CPU on items that may never play.
+- If current playback is live-transcoding instead of playing a prepared no-transcode file, avoid background pre-transcode because it will compete for CPU and can cause stutter.
+
+## 2026-05-24 247 Warm Cache Implementation
+
+- Added a single-slot 247 warm cache. While 247 mode is running, the loop can select the next Meteor/Stremio movie during current playback, cache the remote file, pre-transcode it, and enqueue it as a prepared queue item.
+- Prepared queue items carry `preparedInput`, `preparedTempFiles`, and `forceNoTranscoding`, so auto-advance can start the local optimized MP4 without repeating the remote cache or transcode work.
+- Added separate `warm247` buffer/transcode process and temp-file fields. Current playback cleanup still owns `active*` fields, while background warm-up owns `warm247*` fields until the prepared files are transferred to the queue item.
+- Warm-up only starts when `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=true`, current playback is already using no-transcode prepared output, no next item is queued, no other warm-up is running, and the cache directories have at least about 4 GB free when `statfs` is available.
+- `stop247streaming` cancels any in-progress warm-up. `stop` cancels warm-up and deletes queued prepared files that are not the active playback item.
+- Startup/orphan cleanup now protects active, warm, and queued prepared temp files so a background warm-up is not deleted while it is still being prepared.
+
+## 2026-05-24 Discord Send Timeout Clamp
+
+- Observed runtime logs still showing `Discord channel send timed out after 1500ms`, which means a stale `DISCORD_SEND_TIMEOUT_MS=1500` environment value was overriding the safer 10000ms default.
+- Added a config clamp so nonzero Discord send timeouts below 10000ms are treated as 10000ms. `DISCORD_SEND_TIMEOUT_MS=0` still means wait forever.
+- This should stop commands from immediately cycling through channel-send, reply, and raw REST fallbacks before Discord has enough time to answer on slow hosts.
+- The media side of the same log looked healthy: remote cache completed, pre-transcode started, and progress reached 1.6% at about 3.84x encode speed. With `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=true`, Discord playback still waits for that optimized cache to finish.

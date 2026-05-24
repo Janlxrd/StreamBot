@@ -19,6 +19,14 @@ type TranscodeProgress = {
 	totalSizeBytes?: number;
 };
 
+type PrepareOwner = "active" | "warm247";
+
+type PreparedStreamSource = {
+	inputForFfmpeg: string;
+	tempFilePaths: string[];
+	forceNoTranscoding: boolean;
+};
+
 export class StreamingService {
 	private streamer: Streamer;
 	private mediaService: MediaService;
@@ -31,6 +39,12 @@ export class StreamingService {
 	private activeBufferTempFile: string | null = null;
 	private activeTranscodeProcess: ChildProcessWithoutNullStreams | null = null;
 	private activeTranscodeTempFile: string | null = null;
+	private warm247BufferProcess: ChildProcessWithoutNullStreams | null = null;
+	private warm247BufferTempFile: string | null = null;
+	private warm247TranscodeProcess: ChildProcessWithoutNullStreams | null = null;
+	private warm247TranscodeTempFile: string | null = null;
+	private warm247InProgress: boolean = false;
+	private currentPlaybackForceNoTranscoding: boolean = false;
 
 	constructor(client: Client, streamStatus: StreamStatus) {
 		this.streamer = new Streamer(client);
@@ -218,6 +232,126 @@ export class StreamingService {
 		}
 	}
 
+	public canWarm247NextMovie(): boolean {
+		return (
+			config.preTranscodeBeforePlayback &&
+			this.streamStatus.playing &&
+			this.currentPlaybackForceNoTranscoding &&
+			this.queueService.getLength() <= 1 &&
+			!this.warm247InProgress
+		);
+	}
+
+	private async hasWarm247DiskSpace(): Promise<boolean> {
+		const minFreeBytes = 4 * 1024 * 1024 * 1024;
+		const statfs = (fs.promises as any).statfs;
+
+		if (typeof statfs !== "function") {
+			return true;
+		}
+
+		const dirs = [...new Set([this.getTempBufferDir(), this.getTranscodeCacheDir()])];
+
+		for (const dir of dirs) {
+			try {
+				await fs.promises.mkdir(dir, { recursive: true });
+				const stats = await statfs(dir);
+				const blockSize = Number(stats.bsize || stats.frsize || 0);
+				const availableBlocks = Number(stats.bavail ?? stats.bfree ?? 0);
+				const freeBytes = blockSize * availableBlocks;
+
+				if (Number.isFinite(freeBytes) && freeBytes > 0 && freeBytes < minFreeBytes) {
+					logger.warn(`247 warm cache skipped: ${dir} has only ${this.formatBytes(freeBytes)} free`);
+					return false;
+				}
+			} catch (error) {
+				logger.warn(`247 warm cache disk check failed for ${dir}: ${String(error)}`);
+			}
+		}
+
+		return true;
+	}
+
+	public async warm247NextMovie(message: Message, videoSource: string, title: string): Promise<boolean> {
+		if (!this.canWarm247NextMovie()) {
+			return false;
+		}
+
+		if (!await this.hasWarm247DiskSpace()) {
+			return false;
+		}
+
+		this.warm247InProgress = true;
+		let prepared: PreparedStreamSource | null = null;
+
+		try {
+			logger.info(`247 warm cache preparing next movie: ${title}`);
+			prepared = await this.prepareVideoSource(message, videoSource, title, "warm247", false);
+
+			if (this.queueService.getLength() > 1) {
+				logger.info(`247 warm cache discarded ${title} because another next item is already queued`);
+				this.releaseWarm247Ownership(prepared.tempFilePaths);
+				await this.cleanupPreparedQueueFiles([{
+					id: "warm247-discarded",
+					url: videoSource,
+					title,
+					type: "url",
+					requestedBy: message.author?.username || "247",
+					addedAt: new Date(),
+					preparedTempFiles: prepared.tempFilePaths
+				}]);
+				return false;
+			}
+
+			this.releaseWarm247Ownership(prepared.tempFilePaths);
+
+			const queueItem = await this.queueService.add(
+				videoSource,
+				title,
+				message.author?.username || "247",
+				"url",
+				true,
+				videoSource
+			);
+			queueItem.preparedInput = prepared.inputForFfmpeg;
+			queueItem.preparedTempFiles = prepared.tempFilePaths;
+			queueItem.forceNoTranscoding = prepared.forceNoTranscoding;
+
+			logger.info(`247 warm cache queued prepared next movie: ${title} (${prepared.inputForFfmpeg})`);
+
+			if (!this.streamStatus.playing) {
+				await this.playFromQueue(message);
+			}
+
+			return true;
+		} catch (error) {
+			logger.warn(`247 warm cache failed for ${title}: ${error instanceof Error ? error.message : String(error)}`);
+			if (prepared) {
+				this.releaseWarm247Ownership(prepared.tempFilePaths);
+				await this.cleanupPreparedQueueFiles([{
+					id: "warm247-failed",
+					url: videoSource,
+					title,
+					type: "url",
+					requestedBy: message.author?.username || "247",
+					addedAt: new Date(),
+					preparedTempFiles: prepared.tempFilePaths
+				}]);
+			}
+			await this.stopWarm247Processes();
+			await this.cleanupWarm247Files();
+			return false;
+		} finally {
+			this.warm247InProgress = false;
+		}
+	}
+
+	public async cancel247WarmCache(): Promise<void> {
+		this.warm247InProgress = false;
+		await this.stopWarm247Processes();
+		await this.cleanupWarm247Files();
+	}
+
 	private getTempBufferDir(): string {
 		return config.remoteCacheDir || config.previewCacheDir || "./tmp";
 	}
@@ -235,6 +369,64 @@ export class StreamingService {
 		const safePrebufferMb = Number.isFinite(prebufferMb) && prebufferMb > 0 ? prebufferMb : 200;
 
 		return safePrebufferMb * 1024 * 1024;
+	}
+
+	private setBufferProcess(owner: PrepareOwner, child: ChildProcessWithoutNullStreams, tempFile: string): void {
+		if (owner === "warm247") {
+			this.warm247BufferProcess = child;
+			this.warm247BufferTempFile = tempFile;
+			return;
+		}
+
+		this.activeBufferProcess = child;
+		this.activeBufferTempFile = tempFile;
+	}
+
+	private clearBufferProcess(owner: PrepareOwner, child: ChildProcessWithoutNullStreams): void {
+		if (owner === "warm247") {
+			if (this.warm247BufferProcess === child) {
+				this.warm247BufferProcess = null;
+			}
+			return;
+		}
+
+		if (this.activeBufferProcess === child) {
+			this.activeBufferProcess = null;
+		}
+	}
+
+	private setTranscodeProcess(owner: PrepareOwner, child: ChildProcessWithoutNullStreams, tempFile: string): void {
+		if (owner === "warm247") {
+			this.warm247TranscodeProcess = child;
+			this.warm247TranscodeTempFile = tempFile;
+			return;
+		}
+
+		this.activeTranscodeProcess = child;
+		this.activeTranscodeTempFile = tempFile;
+	}
+
+	private clearTranscodeProcess(owner: PrepareOwner, child: ChildProcessWithoutNullStreams): void {
+		if (owner === "warm247") {
+			if (this.warm247TranscodeProcess === child) {
+				this.warm247TranscodeProcess = null;
+			}
+			return;
+		}
+
+		if (this.activeTranscodeProcess === child) {
+			this.activeTranscodeProcess = null;
+		}
+	}
+
+	private releaseWarm247Ownership(tempFilePaths: string[]): void {
+		if (this.warm247BufferTempFile && tempFilePaths.includes(this.warm247BufferTempFile)) {
+			this.warm247BufferTempFile = null;
+		}
+
+		if (this.warm247TranscodeTempFile && tempFilePaths.includes(this.warm247TranscodeTempFile)) {
+			this.warm247TranscodeTempFile = null;
+		}
 	}
 	
 	private async wait(ms: number): Promise<void> {
@@ -400,15 +592,13 @@ export class StreamingService {
 		return `Pre-transcode progress${percent} for ${title || "movie"}: ${duration}${speed}${fps}${outputSize}`;
 	}
 	
-	private waitForBufferProcess(child: ChildProcessWithoutNullStreams, tempFile: string): Promise<void> {
+	private waitForBufferProcess(child: ChildProcessWithoutNullStreams, tempFile: string, owner: PrepareOwner = "active"): Promise<void> {
 		return new Promise((resolve, reject) => {
 			let settled = false;
 			const finish = (error?: Error) => {
 				if (settled) return;
 				settled = true;
-				if (this.activeBufferProcess === child) {
-					this.activeBufferProcess = null;
-				}
+				this.clearBufferProcess(owner, child);
 				if (error) {
 					reject(error);
 					return;
@@ -438,7 +628,7 @@ export class StreamingService {
 		});
 	}
 
-	private async startHttpPrebuffer(videoSource: string, title?: string): Promise<{ tempFile: string, completion: Promise<void> }> {
+	private async startHttpPrebuffer(videoSource: string, title?: string, owner: PrepareOwner = "active"): Promise<{ tempFile: string, completion: Promise<void> }> {
 		const dir = this.getTempBufferDir();
 		await fs.promises.mkdir(dir, { recursive: true });
 
@@ -463,10 +653,9 @@ export class StreamingService {
 			logger.debug?.(`prebuffer ffmpeg: ${chunk.toString()}`);
 		});
 
-		this.activeBufferProcess = child;
-		this.activeBufferTempFile = tempFile;
+		this.setBufferProcess(owner, child, tempFile);
 
-		const completion = this.waitForBufferProcess(child, tempFile);
+		const completion = this.waitForBufferProcess(child, tempFile, owner);
 		void completion.catch(error => {
 			logger.warn(`Remote cache process did not complete cleanly for ${tempFile}: ${String(error)}`);
 		});
@@ -486,6 +675,19 @@ export class StreamingService {
 			this.activeTranscodeProcess.kill("SIGKILL");
 		}
 		this.activeTranscodeProcess = null;
+	}
+
+	private async stopWarm247Processes(): Promise<void> {
+		if (this.warm247BufferProcess && !this.warm247BufferProcess.killed) {
+			this.warm247BufferProcess.kill("SIGKILL");
+		}
+
+		if (this.warm247TranscodeProcess && !this.warm247TranscodeProcess.killed) {
+			this.warm247TranscodeProcess.kill("SIGKILL");
+		}
+
+		this.warm247BufferProcess = null;
+		this.warm247TranscodeProcess = null;
 	}
 	
 	private async cleanupActivePrebufferFile(): Promise<void> {
@@ -514,6 +716,67 @@ export class StreamingService {
 		} catch (error) {
 			logger.warn(`Failed to delete transcode temp file ${tempFile}: ${String(error)}`);
 		}
+	}
+
+	private async cleanupWarm247Files(): Promise<void> {
+		const tempFiles = [
+			this.warm247BufferTempFile,
+			this.warm247TranscodeTempFile
+		].filter((value): value is string => Boolean(value));
+
+		this.warm247BufferTempFile = null;
+		this.warm247TranscodeTempFile = null;
+
+		for (const tempFile of tempFiles) {
+			try {
+				await fs.promises.unlink(tempFile);
+				logger.info(`Deleted 247 warm cache temp file: ${tempFile}`);
+			} catch (error) {
+				logger.warn(`Failed to delete 247 warm cache temp file ${tempFile}: ${String(error)}`);
+			}
+		}
+	}
+
+	private async cleanupPreparedQueueFiles(items: QueueItem[] = this.queueService.getQueue()): Promise<void> {
+		const tempFiles = new Set<string>();
+
+		for (const item of items) {
+			for (const tempFile of item.preparedTempFiles || []) {
+				tempFiles.add(tempFile);
+			}
+		}
+
+		for (const tempFile of tempFiles) {
+			try {
+				await fs.promises.unlink(tempFile);
+				logger.info(`Deleted queued prepared temp file: ${tempFile}`);
+			} catch (error) {
+				logger.warn(`Failed to delete queued prepared temp file ${tempFile}: ${String(error)}`);
+			}
+		}
+	}
+
+	private getProtectedTempFiles(): Set<string> {
+		const protectedFiles = new Set<string>();
+
+		for (const tempFile of [
+			this.activeBufferTempFile,
+			this.activeTranscodeTempFile,
+			this.warm247BufferTempFile,
+			this.warm247TranscodeTempFile
+		]) {
+			if (tempFile) {
+				protectedFiles.add(tempFile);
+			}
+		}
+
+		for (const item of this.queueService.getQueue()) {
+			for (const tempFile of item.preparedTempFiles || []) {
+				protectedFiles.add(tempFile);
+			}
+		}
+
+		return protectedFiles;
 	}
 
 	public async playFromQueue(message: Message): Promise<void> {
@@ -580,9 +843,17 @@ export class StreamingService {
 		this.queueService.setPlaying(true);
 
 		let videoParams = undefined;
+		const preparedSource = queueItem.preparedInput
+			? {
+				inputForFfmpeg: queueItem.preparedInput,
+				tempFilePaths: queueItem.preparedTempFiles || [],
+				forceNoTranscoding: Boolean(queueItem.forceNoTranscoding)
+			}
+			: undefined;
 
 		const shouldProbe =
 			config.respect_video_params &&
+			!preparedSource &&
 			!this.isProxyLikeStreamUrl(queueItem.url);
 
 		if (shouldProbe) {
@@ -591,8 +862,8 @@ export class StreamingService {
 			logger.info(`Skipping video parameter probe for proxy-like stream URL: ${queueItem.url}`);
 		}
 
-		logger.info(`Playing from queue: ${queueItem.title} (${queueItem.url})`);
-		await this.playVideo(message, queueItem.url, queueItem.title, videoParams);
+		logger.info(`Playing from queue: ${queueItem.title} (${preparedSource ? preparedSource.inputForFfmpeg : queueItem.url})`);
+		await this.playVideo(message, queueItem.url, queueItem.title, videoParams, preparedSource);
 	}
 
 	private async getVideoParameters(videoUrl: string): Promise<{ width: number, height: number, fps?: number, bitrate?: number } | undefined> {
@@ -714,15 +985,13 @@ export class StreamingService {
 		return `scale='min(${targetWidth},iw)':'min(${targetHeight},ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2`;
 	}
 
-	private async waitForTranscodeProcess(child: ChildProcessWithoutNullStreams, tempFile: string): Promise<void> {
+	private async waitForTranscodeProcess(child: ChildProcessWithoutNullStreams, tempFile: string, owner: PrepareOwner = "active"): Promise<void> {
 		return new Promise((resolve, reject) => {
 			let settled = false;
 			const finish = (error?: Error) => {
 				if (settled) return;
 				settled = true;
-				if (this.activeTranscodeProcess === child) {
-					this.activeTranscodeProcess = null;
-				}
+				this.clearTranscodeProcess(owner, child);
 				if (error) {
 					reject(error);
 					return;
@@ -752,7 +1021,13 @@ export class StreamingService {
 		});
 	}
 
-	private async transcodeForPlayback(message: Message, inputFile: string, title?: string): Promise<string> {
+	private async transcodeForPlayback(
+		message: Message,
+		inputFile: string,
+		title?: string,
+		owner: PrepareOwner = "active",
+		notifyDiscord: boolean = true
+	): Promise<string> {
 		const dir = this.getTranscodeCacheDir();
 		await fs.promises.mkdir(dir, { recursive: true });
 
@@ -765,12 +1040,14 @@ export class StreamingService {
 		const threads = this.getPositiveNumber(config.ffmpegThreads);
 		const totalDurationSeconds = await this.getMediaDurationSeconds(inputFile);
 
-		void DiscordUtils.reply(
-			message,
-			`Preparing optimized playback cache for \`${title || "movie"}\`... Playback will start after this CPU transcode finishes.`
-		);
+		if (notifyDiscord) {
+			void DiscordUtils.reply(
+				message,
+				`Preparing optimized playback cache for \`${title || "movie"}\`... Playback will start after this CPU transcode finishes.`
+			);
+		}
 		logger.info(
-			`Starting pre-transcode for ${title || inputFile}: duration=${this.formatDuration(totalDurationSeconds)}, ` +
+			`Starting ${owner === "warm247" ? "247 warm " : ""}pre-transcode for ${title || inputFile}: duration=${this.formatDuration(totalDurationSeconds)}, ` +
 			`target=${this.getPositiveNumber(config.maxWidth) || this.getPositiveNumber(config.width) || 1280}x` +
 			`${this.getPositiveNumber(config.maxHeight) || this.getPositiveNumber(config.height) || 720}, ` +
 			`fps=${fps}, bitrate=${bitrate}k, maxrate=${maxBitrate}k, preset=${preset}, threads=${threads || "auto"}`
@@ -828,7 +1105,7 @@ export class StreamingService {
 			const progressMessage = this.buildTranscodeProgressMessage(title, progress, totalDurationSeconds);
 			logger.info(progressMessage);
 
-			if (now - lastProgressReplyAt >= 5 * 60 * 1000) {
+			if (notifyDiscord && now - lastProgressReplyAt >= 5 * 60 * 1000) {
 				lastProgressReplyAt = now;
 				void DiscordUtils.reply(message, progressMessage);
 			}
@@ -850,18 +1127,19 @@ export class StreamingService {
 			}
 		});
 
-		this.activeTranscodeProcess = child;
-		this.activeTranscodeTempFile = outputFile;
+		this.setTranscodeProcess(owner, child, outputFile);
 
 		try {
-			await this.waitForTranscodeProcess(child, outputFile);
+			await this.waitForTranscodeProcess(child, outputFile, owner);
 			await this.waitForFileSize(outputFile, 1, 5000);
 			return outputFile;
 		} catch (error) {
-			void DiscordUtils.reply(
-				message,
-				`Failed to prepare optimized playback cache for \`${title || "movie"}\`.`
-			);
+			if (notifyDiscord) {
+				void DiscordUtils.reply(
+					message,
+					`Failed to prepare optimized playback cache for \`${title || "movie"}\`.`
+				);
+			}
 			throw error;
 		}
 	}
@@ -999,6 +1277,7 @@ export class StreamingService {
 		try {
 			const dir = this.getTempBufferDir();
 			await fs.promises.mkdir(dir, { recursive: true });
+			const protectedFiles = this.getProtectedTempFiles();
 	
 			const files = await fs.promises.readdir(dir);
 	
@@ -1006,6 +1285,7 @@ export class StreamingService {
 				if (!file.endsWith(".mkv")) continue;
 	
 				const fullPath = path.join(dir, file);
+				if (protectedFiles.has(fullPath)) continue;
 	
 				try {
 					await fs.promises.unlink(fullPath);
@@ -1023,6 +1303,7 @@ export class StreamingService {
 		try {
 			const dir = this.getTranscodeCacheDir();
 			await fs.promises.mkdir(dir, { recursive: true });
+			const protectedFiles = this.getProtectedTempFiles();
 
 			const files = await fs.promises.readdir(dir);
 
@@ -1030,6 +1311,7 @@ export class StreamingService {
 				if (!file.endsWith(".mp4")) continue;
 
 				const fullPath = path.join(dir, file);
+				if (protectedFiles.has(fullPath)) continue;
 
 				try {
 					await fs.promises.unlink(fullPath);
@@ -1046,14 +1328,16 @@ export class StreamingService {
 	private async prepareVideoSource(
 		message: Message,
 		videoSource: string,
-		title?: string
-	): Promise<{ inputForFfmpeg: any, tempFilePaths: string[], forceNoTranscoding: boolean }> {
+		title?: string,
+		owner: PrepareOwner = "active",
+		notifyDiscord: boolean = true
+	): Promise<PreparedStreamSource> {
 		const maybePreTranscode = async (input: string, tempFilePaths: string[] = []) => {
 			if (!config.preTranscodeBeforePlayback) {
 				return { inputForFfmpeg: input, tempFilePaths, forceNoTranscoding: false };
 			}
 
-			const outputFile = await this.transcodeForPlayback(message, input, title);
+			const outputFile = await this.transcodeForPlayback(message, input, title, owner, notifyDiscord);
 			return {
 				inputForFfmpeg: outputFile,
 				tempFilePaths: [...tempFilePaths, outputFile],
@@ -1062,22 +1346,26 @@ export class StreamingService {
 		};
 
 		if (this.isHttpUrl(videoSource) && !this.isYouTubeUrl(videoSource)) {
-			const { tempFile: tempFilePath, completion } = await this.startHttpPrebuffer(videoSource, title);
+			const { tempFile: tempFilePath, completion } = await this.startHttpPrebuffer(videoSource, title, owner);
 
 			if (config.fullCacheRemote || config.preTranscodeBeforePlayback) {
-				void DiscordUtils.reply(
-					message,
-					`Downloading \`${title || "remote movie"}\` to cache before playback starts...`
-				);
+				if (notifyDiscord) {
+					void DiscordUtils.reply(
+						message,
+						`Downloading \`${title || "remote movie"}\` to cache before playback starts...`
+					);
+				}
 
 				try {
 					await completion;
 					await this.waitForFileSize(tempFilePath, 1, 5000);
 				} catch (error) {
-					void DiscordUtils.reply(
-						message,
-						`Failed to cache \`${title || "remote movie"}\` before playback.`
-					);
+					if (notifyDiscord) {
+						void DiscordUtils.reply(
+							message,
+							`Failed to cache \`${title || "remote movie"}\` before playback.`
+						);
+					}
 					throw error;
 				}
 			} else {
@@ -1090,7 +1378,9 @@ export class StreamingService {
 		const mediaSource = await this.mediaService.resolveMediaSource(videoSource);
 	
 		if (mediaSource && mediaSource.type === 'youtube' && !mediaSource.isLive) {
-			const tempFilePath = await this.handleDownload(message, videoSource, title);
+			const tempFilePath = notifyDiscord
+				? await this.handleDownload(message, videoSource, title)
+				: await this.mediaService.downloadYouTubeVideo(videoSource);
 			if (tempFilePath) {
 				return maybePreTranscode(tempFilePath, [tempFilePath]);
 			}
@@ -1150,9 +1440,16 @@ export class StreamingService {
 		await this.cleanupActiveTranscodeFile();
 	}
 
-	public async playVideo(message: Message, videoSource: string, title?: string, videoParams?: { width: number, height: number, fps?: number, bitrate?: number }): Promise<void> {
+	public async playVideo(
+		message: Message,
+		videoSource: string,
+		title?: string,
+		videoParams?: { width: number, height: number, fps?: number, bitrate?: number },
+		preparedSource?: PreparedStreamSource
+	): Promise<void> {
 		const [guildId, channelId] = [config.guildId, config.videoChannelId];
 		this.streamStatus.manualStop = false;
+		this.currentPlaybackForceNoTranscoding = false;
 
 		if (title) {
 			const currentQueueItem = this.queueService.getCurrent();
@@ -1166,8 +1463,15 @@ export class StreamingService {
 			await this.ensureVoiceConnection(guildId, channelId, title);
 			void DiscordUtils.sendInfo(message, "Preparing", `Preparing \`${title || videoSource}\`...`);
 
-			const { inputForFfmpeg, tempFilePaths, forceNoTranscoding } = await this.prepareVideoSource(message, videoSource, title);
+			const { inputForFfmpeg, tempFilePaths, forceNoTranscoding } = preparedSource
+				? preparedSource
+				: await this.prepareVideoSource(message, videoSource, title);
 			tempFiles = tempFilePaths;
+			this.currentPlaybackForceNoTranscoding = forceNoTranscoding || config.noTranscoding;
+
+			if (preparedSource) {
+				logger.info(`Using prepared playback cache for ${title || videoSource}`);
+			}
 
 			logger.info(`FFmpeg input source: ${inputForFfmpeg}`);
 
@@ -1205,6 +1509,7 @@ export class StreamingService {
 			if (this.controller && !this.controller.signal.aborted) this.controller.abort();
 		} finally {
 			await this.finalizeStream(message, tempFiles);
+			this.currentPlaybackForceNoTranscoding = false;
 		}
 	}
 
@@ -1230,6 +1535,7 @@ export class StreamingService {
 			this.streamer.client.user?.setActivity(DiscordUtils.status_idle());
 	
 			this.streamStatus.playing = false;
+			this.currentPlaybackForceNoTranscoding = false;
 			this.streamStatus.manualStop = false;
 			this.streamStatus.channelInfo = {
 				guildId: "",
@@ -1242,6 +1548,13 @@ export class StreamingService {
 	}
 
 	public async stopAndClearQueue(): Promise<void> {
+		const currentItem = this.queueService.getCurrent();
+		const queuedPreparedItems = this.queueService
+			.getQueue()
+			.filter(item => item.id !== currentItem?.id && (item.preparedTempFiles || []).length > 0);
+
+		await this.cancel247WarmCache();
+		await this.cleanupPreparedQueueFiles(queuedPreparedItems);
 		this.queueService.clearQueue();
 		logger.info("Queue cleared by stop command");
 		await this.cleanupStreamStatus();
