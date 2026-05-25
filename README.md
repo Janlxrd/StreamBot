@@ -301,7 +301,7 @@ For Hugging Face CPU Basic Spaces, leave `STREAM_PROFILE` unset for auto-detecti
 STREAM_PROFILE="hf-cpu-basic"
 ```
 
-That profile defaults to 854x480, 24 FPS, 1400-2000 Kbps, two FFmpeg threads, full remote cache, and pre-transcoding before playback. The bot joins voice and sends status before long preparation work so the command does not look dead while the movie is cached.
+That profile defaults to 854x480, 24 FPS, 1400-2000 Kbps, two FFmpeg threads, and full remote cache. Pre-transcoding before playback is opt-in because it can delay a full movie by many minutes before Discord receives any video.
 
 ### 🌐 Web Interface Configuration
 

@@ -47,7 +47,7 @@ STREAM_H26X_PRESET="ultrafast"
 
 - Added `STREAM_PROFILE`. When unset, StreamBot auto-selects `hf-cpu-basic` on Hugging Face Spaces CPU-only environments using `SPACE_ID`/`SPACE_HOST`, `ACCELERATOR`, and `CPU_CORES`.
 - Hugging Face CPU Basic has 2 vCPU, 16 GB RAM, and 50 GB ephemeral disk. The profile therefore favors full remote cache, pre-transcoding, and smaller playback files over live 720p encoding.
-- For `hf-cpu-basic`, unset stream values default to 854x480, 24 FPS, 1400 Kbps average, 2000 Kbps max, `STREAM_FFMPEG_THREADS=2`, `STREAM_FULL_CACHE_REMOTE=true`, `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=true`, and `STREAM_REMOTE_PREBUFFER_MB=50`.
+- For `hf-cpu-basic`, unset stream values default to 854x480, 24 FPS, 1400 Kbps average, 2000 Kbps max, `STREAM_FFMPEG_THREADS=2`, `STREAM_FULL_CACHE_REMOTE=true`, `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=false`, and `STREAM_REMOTE_PREBUFFER_MB=50`.
 - Cache directories default to `/tmp/streambot-remote-cache` and `/tmp/streambot-transcode-cache` on Spaces, so temp files stay on the ephemeral runtime disk and are cleaned on startup/stop.
 - Keep `STREAM_FFMPEG_VIDEO_ENCODER` empty on CPU Basic because there is no GPU encoder.
 
@@ -56,7 +56,7 @@ Hugging Face CPU Basic override profile:
 ```env
 STREAM_PROFILE="hf-cpu-basic"
 STREAM_FULL_CACHE_REMOTE="true"
-STREAM_PRETRANSCODE_BEFORE_PLAYBACK="true"
+STREAM_PRETRANSCODE_BEFORE_PLAYBACK="false"
 STREAM_NO_TRANSCODING="false"
 STREAM_VIDEO_CODEC="H264"
 STREAM_WIDTH="854"
@@ -79,7 +79,7 @@ Minimum variables to add on an existing Space:
 ```env
 STREAM_PROFILE="hf-cpu-basic"
 STREAM_FULL_CACHE_REMOTE="true"
-STREAM_PRETRANSCODE_BEFORE_PLAYBACK="true"
+STREAM_PRETRANSCODE_BEFORE_PLAYBACK="false"
 STREAM_NO_TRANSCODING="false"
 STREAM_FFMPEG_THREADS="2"
 STREAM_REMOTE_PREBUFFER_MB="50"
@@ -91,7 +91,7 @@ Confirmation checklist for an existing Hugging Face Space:
 
 - `STREAM_FFMPEG_VIDEO_ENCODER` should not exist, or should be empty.
 - `STREAM_REMOTE_PREBUFFER_MB` should be `50` on CPU Basic unless startup buffering is too small.
-- After the Space rebuilds, run the Discord `config` command and confirm `streamProfile=hf-cpu-basic`, `width=854`, `height=480`, `fps=24`, `bitrateKbps=1400`, `maxBitrateKbps=2000`, `fullCacheRemote=true`, `preTranscodeBeforePlayback=true`, `remotePrebufferMb=50`, `noTranscoding=false`, and `ffmpegThreads=2`.
+- After the Space rebuilds, run the Discord `config` command and confirm `streamProfile=hf-cpu-basic`, `width=854`, `height=480`, `fps=24`, `bitrateKbps=1400`, `maxBitrateKbps=2000`, `fullCacheRemote=true`, `preTranscodeBeforePlayback=false`, `remotePrebufferMb=50`, `noTranscoding=false`, and `ffmpegThreads=2`.
 
 Docker Compose note: when running outside Hugging Face, Spaces Variables/Secrets are not automatically available. If the compose file references `.env`, create `/path/to/project/.env` on that machine with the same values before running `docker compose up`.
 
@@ -185,3 +185,10 @@ Space metadata note: Hugging Face Spaces requires YAML front matter at the very 
 - The prepared cache itself had already finished; the failure happened when `prepareStream` copied the H.264 video into the NUT pipe and the Discord library's H.264 bitstream filters rejected the packet format.
 - Added `-bsf:v h264_mp4toannexb` when video is copied in no-transcoding mode for H.264, and `-bsf:v hevc_mp4toannexb` for H.265. This keeps the no-transcode prepared-cache path while making the copied bitstream explicit for the demuxer.
 - Existing running containers/spaces must be rebuilt/restarted before this fix appears in the logged FFmpeg command. The command should include `-bsf:v h264_mp4toannexb` on H.264 prepared-cache playback.
+
+## 2026-05-25 Start Playback Default
+
+- Changed the `hf-cpu-basic` default for `STREAM_PRETRANSCODE_BEFORE_PLAYBACK` to `false`.
+- The previous default made the bot wait for the entire optimized MP4 before `prepareStream`/`playStream`. In the observed log, a 2h 5m movie encoding at about 3.84x still meant roughly 30 minutes of no visible Discord video.
+- The profile still uses 854x480, 24 FPS, 1400-2000 Kbps, two FFmpeg threads, and full remote cache. Playback should now start after the remote cache is ready, then FFmpeg transcodes live for Discord.
+- If an existing Hugging Face Space variable explicitly sets `STREAM_PRETRANSCODE_BEFORE_PLAYBACK=true`, update it to `false` or remove it. Explicit environment variables still override profile defaults.
