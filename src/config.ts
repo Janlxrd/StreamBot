@@ -111,7 +111,7 @@ export default {
 	prefix: process.env.PREFIX || '$',
 	guildId: process.env.GUILD_ID ? process.env.GUILD_ID : '',
 	cmdChannelId: process.env.COMMAND_CHANNEL_ID ? process.env.COMMAND_CHANNEL_ID : '',
-	adminOnly: process.env.ADMIN_ONLY ? process.env.ADMIN_ONLY : 'true',
+	adminOnly: process.env.ADMIN_ONLY ? parseBoolean(process.env.ADMIN_ONLY) : true,
 	videoChannelId: process.env.VIDEO_CHANNEL_ID ? process.env.VIDEO_CHANNEL_ID : '',
 	adminIds: process.env.ADMIN_IDS ? parseAdminIds(process.env.ADMIN_IDS) : [],
 	streamProfile,
