@@ -15,7 +15,9 @@ export async function handleMessageCreate(
 	if (
 		message.author.bot ||
 		message.author.id === message.client.user?.id ||
-		!message.content.startsWith(config.prefix)
+		!message.content.startsWith(config.prefix) || 
+		message.channelId !== config.cmdChannelId ||
+		(config.adminOnly && !config.adminIds.includes(message.author.id))
 	) return;
 
 	const args = message.content.slice(config.prefix!.length).trim().split(/ +/);
